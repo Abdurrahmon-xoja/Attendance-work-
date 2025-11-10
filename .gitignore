@@ -1,5 +1,7 @@
 # Environment and credentials
 .env
+.env.production
+.env.test
 *.json
 credentials.json
 

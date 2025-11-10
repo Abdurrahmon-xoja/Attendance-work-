@@ -1614,6 +1614,82 @@ function setupAttendanceHandlers(bot) {
     }
   });
 
+  // Admin command: Manually trigger end-of-day process (for testing)
+  bot.command('endday', async (ctx) => {
+    // Check if user is admin
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      await ctx.reply('❌ У вас нет прав для выполнения этой команды.');
+      return;
+    }
+
+    // In production, require confirmation
+    if (Config.NODE_ENV === 'production') {
+      await ctx.reply(
+        '⚠️ ПРЕДУПРЕЖДЕНИЕ\n\n' +
+        'Эта команда завершит день, архивирует данные и УДАЛИТ текущий лист.\n\n' +
+        'Вы уверены? Используйте /endday_confirm для подтверждения.'
+      );
+      return;
+    }
+
+    try {
+      const today = moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+
+      await ctx.reply(
+        `🔄 Запуск процесса завершения дня для ${today}...\n\n` +
+        `Это займёт несколько секунд...`
+      );
+
+      const schedulerService = require('../../services/scheduler.service');
+      await schedulerService.handleEndOfDay(today, true); // true = manual mode (no wait)
+
+      await ctx.reply(
+        `✅ Завершение дня выполнено!\n\n` +
+        `📊 Данные перенесены в месячный отчёт\n` +
+        `📨 Отчёт отправлен в группу\n` +
+        `🗑 Лист ${today} удалён`
+      );
+
+      logger.info(`Admin ${ctx.from.id} manually triggered end-of-day for ${today}`);
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка при завершении дня: ${error.message}`);
+      logger.error(`Error in /endday command: ${error.message}`);
+    }
+  });
+
+  // Admin command: Confirm end-of-day in production
+  bot.command('endday_confirm', async (ctx) => {
+    // Check if user is admin
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      await ctx.reply('❌ У вас нет прав для выполнения этой команды.');
+      return;
+    }
+
+    try {
+      const today = moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+
+      await ctx.reply(
+        `🔄 Запуск процесса завершения дня для ${today}...\n\n` +
+        `Обработка занимает несколько секунд...`
+      );
+
+      const schedulerService = require('../../services/scheduler.service');
+      await schedulerService.handleEndOfDay(today, true); // true = manual mode (no wait)
+
+      await ctx.reply(
+        `✅ Завершение дня выполнено!\n\n` +
+        `📊 Данные перенесены в месячный отчёт\n` +
+        `📨 Отчёт отправлен в группу\n` +
+        `🗑 Лист ${today} удалён`
+      );
+
+      logger.info(`Admin ${ctx.from.id} manually confirmed and triggered end-of-day for ${today}`);
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка при завершении дня: ${error.message}`);
+      logger.error(`Error in /endday_confirm command: ${error.message}`);
+    }
+  });
+
   // Handle overtime arrival confirmation
   bot.action(/^overtime_arrival:(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();

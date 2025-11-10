@@ -54,6 +54,10 @@ class SchedulerService {
     this.setupNoShowCheck();
     logger.info('✅ No-show penalty check ENABLED');
 
+    // Setup end-of-day archiving process
+    this.setupEndOfDayArchiving();
+    logger.info('✅ End-of-day archiving ENABLED');
+
     logger.info('Scheduler service initialized');
   }
 
@@ -112,8 +116,13 @@ class SchedulerService {
       const today = now.format('YYYY-MM-DD');
       const currentMinute = now.format('HH:mm');
 
-      // Initialize today's sheet if it doesn't exist
-      await sheetsService.initializeDailySheet(today);
+      // Check if today's sheet exists
+      const sheetExists = sheetsService.doc.sheetsByTitle[today];
+      if (!sheetExists) {
+        // Sheet doesn't exist yet - skip reminder check
+        // Sheet will be created when first user marks attendance
+        return;
+      }
 
       // Get today's attendance sheet
       const worksheet = await sheetsService.getWorksheet(today);
@@ -639,6 +648,14 @@ class SchedulerService {
       }
 
       const sheetsService = require('./sheets.service');
+
+      // Check if sheet exists
+      const sheetExists = sheetsService.doc.sheetsByTitle[date];
+      if (!sheetExists) {
+        logger.info(`Sheet ${date} doesn't exist - skipping daily report`);
+        return;
+      }
+
       const worksheet = await sheetsService.getWorksheet(date);
       await worksheet.loadHeaderRow();
       const rows = await worksheet.getRows();
@@ -835,6 +852,14 @@ class SchedulerService {
 
       const sheetsService = require('./sheets.service');
       const sheetName = `Report_${yearMonth}`;
+
+      // Check if sheet exists
+      const sheetExists = sheetsService.doc.sheetsByTitle[sheetName];
+      if (!sheetExists) {
+        logger.info(`Sheet ${sheetName} doesn't exist - skipping monthly report`);
+        return;
+      }
+
       const worksheet = await sheetsService.getWorksheet(sheetName);
       await worksheet.loadHeaderRow();
       const rows = await worksheet.getRows();
@@ -905,6 +930,13 @@ class SchedulerService {
    */
   async checkAndMarkNoShows(dateStr) {
     try {
+      // Check if sheet exists
+      const sheetExists = sheetsService.doc.sheetsByTitle[dateStr];
+      if (!sheetExists) {
+        logger.info(`Sheet ${dateStr} doesn't exist - skipping no-show check`);
+        return;
+      }
+
       // Get daily sheet
       const worksheet = await sheetsService.getWorksheet(dateStr);
       await worksheet.loadHeaderRow();
@@ -968,6 +1000,400 @@ class SchedulerService {
       return noShowCount;
     } catch (error) {
       logger.error(`Error in checkAndMarkNoShows: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Setup end-of-day archiving process
+   * Runs at midnight (00:00) to archive the day and prepare for new day
+   */
+  setupEndOfDayArchiving() {
+    // Run at 00:00 every day (midnight)
+    const job = cron.schedule('0 0 * * *', async () => {
+      try {
+        const yesterday = moment.tz(Config.TIMEZONE).subtract(1, 'day').format('YYYY-MM-DD');
+        logger.info(`Starting end-of-day archiving for ${yesterday}`);
+
+        await this.handleEndOfDay(yesterday, false); // false = automatic (with 2-min wait)
+
+        logger.info(`End-of-day archiving completed for ${yesterday}`);
+      } catch (error) {
+        logger.error(`Error in end-of-day archiving: ${error.message}`);
+      }
+    }, {
+      timezone: Config.TIMEZONE
+    });
+
+    this.jobs.push(job);
+    logger.info('End-of-day archiving job scheduled (runs at 00:00 every day)');
+  }
+
+  /**
+   * Handle end-of-day process
+   * @param {string} dateStr - Date in YYYY-MM-DD format
+   * @param {boolean} manual - If true, skip the 2-minute wait (for testing)
+   */
+  async handleEndOfDay(dateStr, manual = false) {
+    try {
+      logger.info(`=== Starting End-of-Day Process for ${dateStr} ===`);
+
+      // Check if sheet exists
+      const sheetExists = sheetsService.doc.sheetsByTitle[dateStr];
+      if (!sheetExists) {
+        logger.info(`Sheet ${dateStr} doesn't exist - skipping end-of-day process`);
+        return;
+      }
+
+      // Step 1: Handle overnight workers
+      logger.info('Step 1: Handling overnight workers...');
+      const overnightWorkers = await this.handleOvernightWorkers(dateStr);
+
+      // Step 2: Wait 2 minutes for responses (only in automatic mode)
+      if (!manual && overnightWorkers > 0) {
+        logger.info(`Step 2: Waiting 2 minutes for overnight worker responses...`);
+        await new Promise(resolve => setTimeout(resolve, 120000)); // 2 minutes
+      } else if (manual) {
+        logger.info('Step 2: Skipped (manual mode)');
+      }
+
+      // Step 3: Transfer data to monthly report
+      logger.info('Step 3: Transferring data to monthly report...');
+      const transferred = await this.transferDailyDataToMonthly(dateStr);
+      if (!transferred) {
+        logger.error('Failed to transfer data - ABORTING end-of-day process to prevent data loss');
+        return;
+      }
+
+      // Step 4: Send report to Telegram group
+      logger.info('Step 4: Sending report to Telegram group...');
+      await this.sendDailyReportToGroup(dateStr);
+
+      // Step 5: Delete the daily sheet
+      logger.info('Step 5: Deleting daily sheet...');
+      await this.deleteDailySheet(dateStr);
+
+      logger.info(`=== End-of-Day Process Completed for ${dateStr} ===`);
+    } catch (error) {
+      logger.error(`Error in handleEndOfDay: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Handle employees who are still working at midnight
+   * @param {string} dateStr - Date in YYYY-MM-DD format
+   * @returns {number} Number of overnight workers handled
+   */
+  async handleOvernightWorkers(dateStr) {
+    try {
+      const worksheet = await sheetsService.getWorksheet(dateStr);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      let overnightCount = 0;
+      const CalculatorService = require('./calculator.service');
+      const { Markup } = require('telegraf');
+
+      for (const row of rows) {
+        const name = row.get('Name') || '';
+        const telegramId = row.get('TelegramId') || '';
+        const whenCome = row.get('When come') || '';
+        const leaveTime = row.get('Leave time') || '';
+
+        // Check if person arrived but didn't leave
+        if (whenCome.trim() && !leaveTime.trim() && telegramId.trim()) {
+          overnightCount++;
+
+          // Set leave time to 23:59
+          const endTime = '23:59';
+          row.set('Leave time', endTime);
+
+          // Calculate hours worked
+          const arrivalTime = moment.tz(`${dateStr} ${whenCome}`, 'YYYY-MM-DD HH:mm', Config.TIMEZONE);
+          const departureTime = moment.tz(`${dateStr} ${endTime}`, 'YYYY-MM-DD HH:mm', Config.TIMEZONE);
+          const hoursWorked = departureTime.diff(arrivalTime, 'minutes') / 60;
+          row.set('Hours worked', hoursWorked.toFixed(2));
+
+          await row.save();
+
+          logger.info(`Auto-ended work for overnight worker: ${name} (${telegramId}) at ${endTime}`);
+
+          // Send notification with button
+          if (this.bot) {
+            try {
+              const tomorrow = moment.tz(dateStr, Config.TIMEZONE).add(1, 'day').format('YYYY-MM-DD');
+              const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY');
+              const formattedTomorrow = moment.tz(tomorrow, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
+
+              await this.bot.telegram.sendMessage(
+                telegramId,
+                `⚠️ Ваше рабочее время автоматически завершено\n\n` +
+                `📅 Дата: ${formattedDate}\n` +
+                `🕐 Время окончания: ${endTime}\n` +
+                `⏱ Отработано часов: ${hoursWorked.toFixed(2)}\n\n` +
+                `Если вы всё ещё работаете ночную смену, нажмите кнопку ниже, чтобы отметить приход на новый день (${formattedTomorrow}):`,
+                Markup.inlineKeyboard([
+                  [Markup.button.callback('✅ Я всё ещё здесь - Отметить приход', `overnight_still_working:${tomorrow}`)]
+                ])
+              );
+            } catch (msgError) {
+              logger.error(`Failed to send overnight notification to ${telegramId}: ${msgError.message}`);
+            }
+          }
+
+          // Add delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+
+      logger.info(`Handled ${overnightCount} overnight workers on ${dateStr}`);
+      return overnightCount;
+    } catch (error) {
+      logger.error(`Error handling overnight workers: ${error.message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Transfer daily data to monthly report
+   * @param {string} dateStr - Date in YYYY-MM-DD format
+   * @returns {boolean} True if successful
+   */
+  async transferDailyDataToMonthly(dateStr) {
+    try {
+      const yearMonth = moment.tz(dateStr, Config.TIMEZONE).format('YYYY-MM');
+      const reportSheetName = `Report_${yearMonth}`;
+
+      // Ensure monthly report exists
+      let monthlySheet = sheetsService.doc.sheetsByTitle[reportSheetName];
+      if (!monthlySheet) {
+        logger.info(`Creating monthly report ${reportSheetName}`);
+        await sheetsService.initializeMonthlyReport(yearMonth);
+        monthlySheet = await sheetsService.getWorksheet(reportSheetName);
+      } else {
+        monthlySheet = await sheetsService.getWorksheet(reportSheetName);
+      }
+
+      // Get daily data
+      const dailySheet = await sheetsService.getWorksheet(dateStr);
+      await dailySheet.loadHeaderRow();
+      const dailyRows = await dailySheet.getRows();
+
+      // Load monthly sheet
+      await monthlySheet.loadHeaderRow();
+      const monthlyRows = await monthlySheet.getRows();
+
+      // Transfer data for each employee
+      for (const dailyRow of dailyRows) {
+        const telegramId = (dailyRow.get('TelegramId') || '').toString().trim();
+        const name = dailyRow.get('Name') || '';
+
+        if (!telegramId && !name) continue;
+
+        // Find employee in monthly report
+        let monthlyRow = monthlyRows.find(row => {
+          const rowTelegramId = (row.get('Telegram Id') || '').toString().trim();
+          const rowName = row.get('Name') || '';
+          return (telegramId && rowTelegramId === telegramId) || rowName === name;
+        });
+
+        // If employee not in monthly report, add them
+        if (!monthlyRow) {
+          logger.info(`Adding new employee to monthly report: ${name}`);
+          monthlyRow = await monthlySheet.addRow({
+            'Name': name,
+            'Telegram Id': telegramId,
+            'Rating': '10.0',
+            'Worked days': '0',
+            'Late days': '0',
+            'Absent days': '0',
+            'Total hours': '0',
+            'Required hours': '0',
+            'Deficit hours': '0',
+            'Status': 'Active'
+          });
+          await monthlyRow.save();
+          // Reload to get the new row
+          const updatedRows = await monthlySheet.getRows();
+          monthlyRow = updatedRows[updatedRows.length - 1];
+        }
+
+        // Update statistics
+        const hoursWorked = parseFloat(dailyRow.get('Hours worked') || '0');
+        const cameOnTime = dailyRow.get('Came on time') || '';
+        const absent = dailyRow.get('Absent') || '';
+        const point = parseFloat(dailyRow.get('Point') || '0');
+
+        // Update worked days
+        const whenCome = dailyRow.get('When come') || '';
+        if (whenCome.trim() || absent.toLowerCase() === 'yes') {
+          const currentWorkedDays = parseInt(monthlyRow.get('Worked days') || '0');
+          monthlyRow.set('Worked days', currentWorkedDays + 1);
+        }
+
+        // Update late days
+        if (cameOnTime.toLowerCase() === 'false' || cameOnTime.toLowerCase() === 'no') {
+          const currentLateDays = parseInt(monthlyRow.get('Late days') || '0');
+          monthlyRow.set('Late days', currentLateDays + 1);
+        }
+
+        // Update absent days
+        if (absent.toLowerCase() === 'yes') {
+          const currentAbsentDays = parseInt(monthlyRow.get('Absent days') || '0');
+          monthlyRow.set('Absent days', currentAbsentDays + 1);
+        }
+
+        // Update total hours
+        const currentTotalHours = parseFloat(monthlyRow.get('Total hours') || '0');
+        monthlyRow.set('Total hours', (currentTotalHours + hoursWorked).toFixed(2));
+
+        // Update rating
+        const currentRating = parseFloat(monthlyRow.get('Rating') || '10.0');
+        const newRating = Math.max(0, Math.min(10, currentRating + point));
+        monthlyRow.set('Rating', newRating.toFixed(1));
+
+        await monthlyRow.save();
+        logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h, rating: ${newRating.toFixed(1)}`);
+      }
+
+      logger.info(`Successfully transferred data from ${dateStr} to ${reportSheetName}`);
+      return true;
+    } catch (error) {
+      logger.error(`Error transferring daily data to monthly: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Send daily report to Telegram group
+   * @param {string} dateStr - Date in YYYY-MM-DD format
+   */
+  async sendDailyReportToGroup(dateStr) {
+    try {
+      if (!this.bot) {
+        logger.error('Bot instance not initialized');
+        return;
+      }
+
+      if (!Config.DAILY_REPORT_GROUP_ID) {
+        logger.warn('DAILY_REPORT_GROUP_ID not configured - skipping group report');
+        return;
+      }
+
+      const worksheet = await sheetsService.getWorksheet(dateStr);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      if (rows.length === 0) {
+        logger.info('No data for daily report');
+        return;
+      }
+
+      // Generate statistics
+      let presentCount = 0;
+      let lateCount = 0;
+      let absentCount = 0;
+      let leftEarlyCount = 0;
+      let totalHoursWorked = 0;
+
+      const employeeStats = [];
+
+      for (const row of rows) {
+        const name = row.get('Name') || '';
+        const whenCome = row.get('When come') || '';
+        const leaveTime = row.get('Leave time') || '';
+        const cameOnTime = row.get('Came on time') || '';
+        const absent = row.get('Absent') || '';
+        const leftEarly = row.get('Left early') || '';
+        const hoursWorked = parseFloat(row.get('Hours worked') || '0');
+
+        if (whenCome.trim()) {
+          presentCount++;
+          totalHoursWorked += hoursWorked;
+
+          let status = '✅';
+          if (cameOnTime.toLowerCase() === 'false' || cameOnTime.toLowerCase() === 'no') {
+            status = '⚠️';
+            lateCount++;
+          }
+          if (leftEarly.toLowerCase() === 'yes') {
+            status = '🟡';
+            leftEarlyCount++;
+          }
+
+          employeeStats.push({
+            name,
+            status,
+            arrival: whenCome,
+            departure: leaveTime || '-',
+            hours: hoursWorked.toFixed(1)
+          });
+        } else if (absent.toLowerCase() === 'yes') {
+          absentCount++;
+          employeeStats.push({
+            name,
+            status: '❌',
+            arrival: 'Отсутствует',
+            departure: '-',
+            hours: '0'
+          });
+        }
+      }
+
+      // Format report
+      const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY (dddd)');
+      let report = `📊 <b>ОТЧЁТ ЗА ${formattedDate.toUpperCase()}</b>\n\n`;
+
+      report += `<b>📈 Статистика:</b>\n`;
+      report += `✅ Присутствовали: ${presentCount}\n`;
+      report += `⚠️ Опоздали: ${lateCount}\n`;
+      report += `❌ Отсутствовали: ${absentCount}\n`;
+      report += `🟡 Ушли раньше: ${leftEarlyCount}\n`;
+      report += `⏱ Всего часов: ${totalHoursWorked.toFixed(1)}\n\n`;
+
+      report += `<b>👥 Детали по сотрудникам:</b>\n`;
+      report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+
+      for (const emp of employeeStats) {
+        report += `${emp.status} <b>${emp.name}</b>\n`;
+        report += `   Приход: ${emp.arrival} | Уход: ${emp.departure}\n`;
+        report += `   Часов: ${emp.hours}\n\n`;
+      }
+
+      report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+      report += `📅 Данные за ${dateStr} архивированы\n`;
+      report += `🤖 Отчёт создан автоматически`;
+
+      // Send to group
+      await this.bot.telegram.sendMessage(
+        Config.DAILY_REPORT_GROUP_ID,
+        report,
+        { parse_mode: 'HTML' }
+      );
+
+      logger.info(`Daily report sent to group ${Config.DAILY_REPORT_GROUP_ID}`);
+    } catch (error) {
+      logger.error(`Error sending daily report to group: ${error.message}`);
+    }
+  }
+
+  /**
+   * Delete daily sheet from Google Sheets
+   * @param {string} dateStr - Date in YYYY-MM-DD format
+   */
+  async deleteDailySheet(dateStr) {
+    try {
+      const sheet = sheetsService.doc.sheetsByTitle[dateStr];
+      if (!sheet) {
+        logger.warn(`Sheet ${dateStr} not found - already deleted?`);
+        return;
+      }
+
+      await sheet.delete();
+      logger.info(`Successfully deleted daily sheet: ${dateStr}`);
+    } catch (error) {
+      logger.error(`Error deleting daily sheet ${dateStr}: ${error.message}`);
       throw error;
     }
   }

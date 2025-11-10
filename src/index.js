@@ -66,6 +66,11 @@ async function start() {
     schedulerService.init(bot);
 
     logger.info('✅ Bot started successfully!');
+    logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    logger.info(`🤖 ENVIRONMENT: ${Config.NODE_ENV.toUpperCase()}`);
+    logger.info(`📱 Bot Token: ${Config.BOT_TOKEN.substring(0, 15)}...`);
+    logger.info(`📊 Google Sheet ID: ${Config.GOOGLE_SHEETS_ID.substring(0, 20)}...`);
+    logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     logger.info(`Timezone: ${Config.TIMEZONE}`);
     logger.info(`Grace period: ${Config.GRACE_PERIOD_MINUTES} minutes`);
     logger.info(`Late deadline: ${Config.LATE_DEADLINE_TIME}`);

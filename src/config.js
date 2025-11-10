@@ -11,6 +11,7 @@ class Config {
   static ADMIN_TELEGRAM_IDS = process.env.ADMIN_TELEGRAM_IDS
     ? process.env.ADMIN_TELEGRAM_IDS.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id))
     : [];
+  static DAILY_REPORT_GROUP_ID = process.env.DAILY_REPORT_GROUP_ID || '';
 
   // Google Sheets Configuration
   static GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID || '';

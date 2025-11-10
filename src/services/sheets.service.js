@@ -255,13 +255,8 @@ class SheetsService {
       // Multi-level check for existing data to prevent accidental re-initialization
       let hasHeaders = false;
       let existingRows = [];
-      let hasExistingData = false;
 
-      // Check 1: Row count - if sheet has more than 1 row, it has data
-      const rowCount = worksheet.rowCount || 0;
-      hasExistingData = rowCount > 1; // More than just header row
-
-      // Check 2: Try to load headers
+      // Try to load headers
       try {
         await worksheet.loadHeaderRow();
         const headerValues = worksheet.headerValues || [];
@@ -271,16 +266,37 @@ class SheetsService {
           existingRows = await worksheet.getRows();
         }
 
-        logger.info(`Sheet ${sheetName} state check: hasHeaders=${hasHeaders}, rowCount=${rowCount}, existingRows=${existingRows.length}, headerValues=${headerValues.length}`);
+        logger.info(`Sheet ${sheetName} state check: hasHeaders=${hasHeaders}, existingRows=${existingRows.length}, headerValues=${headerValues.length}`);
       } catch (err) {
         logger.warn(`Header detection error for ${sheetName}: ${err.message}`);
         hasHeaders = false;
       }
 
-      // CRITICAL SAFETY CHECK: If sheet has rows but headers not detected,
+      // Check if sheet has actual data by trying to get cell values from first data row
+      let hasActualData = false;
+      if (!hasHeaders) {
+        try {
+          await worksheet.loadCells('A1:Z2');
+          // Check if any cell in first two rows has a value
+          for (let row = 0; row < 2; row++) {
+            for (let col = 0; col < 26; col++) {
+              const cell = worksheet.getCell(row, col);
+              if (cell && cell.value) {
+                hasActualData = true;
+                break;
+              }
+            }
+            if (hasActualData) break;
+          }
+        } catch (err) {
+          logger.warn(`Could not check for actual data: ${err.message}`);
+        }
+      }
+
+      // CRITICAL SAFETY CHECK: If sheet has actual cell values but headers not detected,
       // treat as existing to prevent data loss
-      if (!hasHeaders && hasExistingData) {
-        logger.warn(`⚠️  SAFETY CHECK: Sheet ${sheetName} has ${rowCount} rows but headers not detected - treating as existing to PREVENT DATA LOSS`);
+      if (!hasHeaders && hasActualData) {
+        logger.warn(`⚠️  SAFETY CHECK: Sheet ${sheetName} has actual data but headers not detected - treating as existing to PREVENT DATA LOSS`);
         hasHeaders = true; // Force true to prevent re-initialization
 
         // Try to load rows without headers to preserve them
