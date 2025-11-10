@@ -1748,6 +1748,74 @@ function setupAttendanceHandlers(bot) {
     }
   });
 
+  // Handle overnight worker "still working" button
+  bot.action(/^overnight_still_working:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+
+    const user = await getUserOrPromptRegistration(ctx);
+    if (!user) return;
+
+    const tomorrow = ctx.match[1]; // Date in YYYY-MM-DD format
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const currentTime = now.format('HH:mm');
+
+      // Initialize tomorrow's sheet if needed
+      await sheetsService.initializeDailySheet(tomorrow);
+
+      // Get tomorrow's sheet
+      const worksheet = await sheetsService.getWorksheet(tomorrow);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      // Find employee row
+      const employeeRow = rows.find(row => {
+        const rowTelegramId = (row.get('TelegramId') || '').toString().trim();
+        return rowTelegramId === user.telegramId.toString();
+      });
+
+      if (!employeeRow) {
+        await ctx.editMessageText(
+          `❌ Ошибка: не удалось найти вас в листе ${tomorrow}\n\n` +
+          `Попробуйте отметить приход обычным способом.`
+        );
+        return;
+      }
+
+      // Mark arrival for the new day
+      employeeRow.set('When come', currentTime);
+      employeeRow.set('Came on time', 'true'); // Coming overnight is considered on time
+      await employeeRow.save();
+
+      // Log event
+      await sheetsService.logEvent(
+        user.telegramId,
+        user.nameFull,
+        'OVERNIGHT_CONTINUATION',
+        `Продолжение работы с предыдущего дня на ${tomorrow}`,
+        0.5 // Bonus for overnight work
+      );
+
+      const formattedDate = moment.tz(tomorrow, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
+
+      await ctx.editMessageText(
+        `✅ Приход отмечен для ${formattedDate}!\n\n` +
+        `⏰ Время: ${currentTime}\n` +
+        `🌙 Продолжение ночной смены\n` +
+        `📊 Бонус: +0.5 балла\n\n` +
+        `Не забудьте отметить уход, когда закончите работу!`
+      );
+
+      await ctx.reply('🏠 Главное меню:', Keyboards.getMainMenu(ctx.from.id));
+
+      logger.info(`Overnight worker ${user.nameFull} marked arrival for ${tomorrow} at ${currentTime}`);
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
+      logger.error(`Error in overnight_still_working: ${error.message}`);
+    }
+  });
+
   // Admin command: Update monthly report manually
   bot.command('updatereport', async (ctx) => {
     // Check if user is admin
@@ -3681,24 +3749,63 @@ async function handleStatus(ctx) {
   response += `Баллы: ${todayPoint} ${pointEmoji}\n`;
   response += `Статус: ${pointMessage}`;
 
-  // Add monthly time balance
-  const balance = await sheetsService.getMonthlyBalance(user.telegramId);
-  response += `\n\n⏱ БАЛАНС ВРЕМЕНИ ЗА МЕСЯЦ:\n`;
+  // Add comprehensive monthly statistics from monthly report
+  const monthlyStats = await sheetsService.getMonthlyStats(user.telegramId);
 
-  if (balance.totalDeficitMinutes > 0) {
-    response += `⚠️ Недоработка: ${CalculatorService.formatTimeDiff(balance.totalDeficitMinutes)}\n`;
-  }
-  if (balance.totalSurplusMinutes > 0) {
-    response += `✅ Переработка: ${CalculatorService.formatTimeDiff(balance.totalSurplusMinutes)}\n`;
-  }
+  if (monthlyStats) {
+    const currentMonth = now.format('MMMM YYYY', 'ru');
+    response += `\n\n📊 СТАТИСТИКА ЗА МЕСЯЦ (${now.format('MMMM YYYY').toUpperCase()}):\n\n`;
 
-  const netBalance = balance.netBalanceMinutes;
-  if (netBalance > 0) {
-    response += `📊 Итого: +${CalculatorService.formatTimeDiff(netBalance)}`;
-  } else if (netBalance < 0) {
-    response += `📊 Итого: -${CalculatorService.formatTimeDiff(Math.abs(netBalance))}`;
+    // Attendance summary
+    response += `📅 Посещаемость:\n`;
+    response += `  • Отработано дней: ${monthlyStats.daysWorked}/${monthlyStats.totalWorkDays}\n`;
+    response += `  • Процент присутствия: ${monthlyStats.attendanceRate.toFixed(1)}%\n`;
+    response += `  • Пропущено: ${monthlyStats.daysAbsent} дней\n`;
+
+    // Punctuality
+    response += `\n⏰ Пунктуальность:\n`;
+    response += `  • Вовремя: ${monthlyStats.onTimeArrivals} раз\n`;
+    response += `  • Опоздания (предупр.): ${monthlyStats.lateArrivalsNotified}\n`;
+    response += `  • Опоздания (без предупр.): ${monthlyStats.lateArrivalsSilent}\n`;
+    response += `  • Процент вовремя: ${monthlyStats.onTimeRate.toFixed(1)}%\n`;
+
+    // Work hours
+    response += `\n⏱ Рабочие часы:\n`;
+    response += `  • Отработано: ${monthlyStats.totalHoursWorked.toFixed(1)} ч\n`;
+    response += `  • Требуется: ${monthlyStats.totalHoursRequired.toFixed(1)} ч\n`;
+
+    // Balance with status emoji
+    response += `\n💰 Баланс времени:\n`;
+    response += `  • Переработка: ${CalculatorService.formatTimeDiff(monthlyStats.totalSurplusMinutes)}\n`;
+    response += `  • Недоработка: ${CalculatorService.formatTimeDiff(monthlyStats.totalDeficitMinutes)}\n`;
+    response += `  • Штрафы: ${CalculatorService.formatTimeDiff(monthlyStats.totalPenaltyMinutes)}\n`;
+    response += `  • Итого: ${monthlyStats.netBalanceHours} ${monthlyStats.balanceStatus}\n`;
+
+    // Rating
+    response += `\n⭐ Рейтинг:\n`;
+    response += `  • Баллов: ${monthlyStats.totalPoints.toFixed(1)}\n`;
+    response += `  • Средний балл: ${monthlyStats.averageDailyPoints.toFixed(2)}\n`;
+    response += `  • Оценка: ${monthlyStats.rating.toFixed(1)}/10 ${monthlyStats.ratingZone}\n`;
   } else {
-    response += `📊 Итого: 0 ч (баланс)`;
+    // Fallback to old balance calculation if monthly report not available
+    const balance = await sheetsService.getMonthlyBalance(user.telegramId);
+    response += `\n\n⏱ БАЛАНС ВРЕМЕНИ ЗА МЕСЯЦ:\n`;
+
+    if (balance.totalDeficitMinutes > 0) {
+      response += `⚠️ Недоработка: ${CalculatorService.formatTimeDiff(balance.totalDeficitMinutes)}\n`;
+    }
+    if (balance.totalSurplusMinutes > 0) {
+      response += `✅ Переработка: ${CalculatorService.formatTimeDiff(balance.totalSurplusMinutes)}\n`;
+    }
+
+    const netBalance = balance.netBalanceMinutes;
+    if (netBalance > 0) {
+      response += `📊 Итого: +${CalculatorService.formatTimeDiff(netBalance)}`;
+    } else if (netBalance < 0) {
+      response += `📊 Итого: -${CalculatorService.formatTimeDiff(Math.abs(netBalance))}`;
+    } else {
+      response += `📊 Итого: 0 ч (баланс)`;
+    }
   }
 
   await ctx.reply(response, Keyboards.getMainMenu(ctx.from.id));

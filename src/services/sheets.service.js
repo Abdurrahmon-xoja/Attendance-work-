@@ -348,7 +348,8 @@ class SheetsService {
           'Currently out',
           'Penalty minutes',
           'Required end time',
-          'Point'
+          'Point',
+          'Office Responsible'
         ]);
         await worksheet.loadHeaderRow();
 
@@ -1334,6 +1335,73 @@ class SheetsService {
         totalSurplusMinutes: 0,
         netBalanceMinutes: 0
       };
+    }
+  }
+
+  /**
+   * Get comprehensive monthly statistics from monthly report
+   * @param {string} telegramId - Employee's Telegram ID
+   * @returns {Object} Monthly statistics
+   */
+  async getMonthlyStats(telegramId) {
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const yearMonth = now.format('YYYY-MM');
+      const sheetName = `Report_${yearMonth}`;
+
+      // Get monthly report sheet
+      const worksheet = this.doc.sheetsByTitle[sheetName];
+      if (!worksheet) {
+        logger.warn(`Monthly report sheet not found: ${sheetName}`);
+        return null;
+      }
+
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      // Find employee's row
+      for (const row of rows) {
+        if (row.get('Telegram ID')?.toString().trim() === telegramId.toString()) {
+          // Extract all monthly statistics
+          return {
+            name: row.get('Name') || '',
+            company: row.get('Company') || '',
+            workSchedule: row.get('Work Schedule') || '',
+            totalWorkDays: parseInt(row.get('Total Work Days') || '0'),
+            daysWorked: parseInt(row.get('Days Worked') || '0'),
+            daysAbsent: parseInt(row.get('Days Absent') || '0'),
+            daysAbsentNotified: parseInt(row.get('Days Absent (Notified)') || '0'),
+            daysAbsentSilent: parseInt(row.get('Days Absent (Silent)') || '0'),
+            onTimeArrivals: parseInt(row.get('On Time Arrivals') || '0'),
+            lateArrivalsNotified: parseInt(row.get('Late Arrivals (Notified)') || '0'),
+            lateArrivalsSilent: parseInt(row.get('Late Arrivals (Silent)') || '0'),
+            earlyDepartures: parseInt(row.get('Early Departures') || '0'),
+            totalHoursRequired: parseFloat(row.get('Total Hours Required') || '0'),
+            totalHoursWorked: parseFloat(row.get('Total Hours Worked') || '0'),
+            hoursDeficitSurplus: parseFloat(row.get('Hours Deficit/Surplus') || '0'),
+            totalPenaltyMinutes: parseInt(row.get('Total Penalty Minutes') || '0'),
+            totalDeficitMinutes: parseInt(row.get('Total Deficit Minutes') || '0'),
+            totalSurplusMinutes: parseInt(row.get('Total Surplus Minutes') || '0'),
+            netBalanceMinutes: parseInt(row.get('Net Balance Minutes') || '0'),
+            netBalanceHours: row.get('Net Balance (Hours)') || '+0:00',
+            balanceStatus: row.get('Balance Status') || '⚪ Balanced',
+            totalPoints: parseFloat(row.get('Total Points') || '0'),
+            averageDailyPoints: parseFloat(row.get('Average Daily Points') || '0'),
+            rating: parseFloat(row.get('Rating (0-10)') || '0'),
+            ratingZone: row.get('Rating Zone') || '',
+            attendanceRate: parseFloat(row.get('Attendance Rate %') || '0'),
+            onTimeRate: parseFloat(row.get('On-Time Rate %') || '0'),
+            lastUpdated: row.get('Last Updated') || ''
+          };
+        }
+      }
+
+      // Employee not found in monthly report
+      logger.warn(`Employee ${telegramId} not found in monthly report ${sheetName}`);
+      return null;
+    } catch (error) {
+      logger.error(`Error getting monthly stats: ${error.message}`);
+      return null;
     }
   }
 

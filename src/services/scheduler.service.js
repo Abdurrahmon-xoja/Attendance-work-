@@ -1006,7 +1006,7 @@ class SchedulerService {
 
   /**
    * Setup end-of-day archiving process
-   * Runs at midnight (00:00) to archive the day and prepare for new day
+   * Runs at midnight (00:00) to archive the previous day and prepare for new day
    */
   setupEndOfDayArchiving() {
     // Run at 00:00 every day (midnight)
@@ -1105,7 +1105,7 @@ class SchedulerService {
         if (whenCome.trim() && !leaveTime.trim() && telegramId.trim()) {
           overnightCount++;
 
-          // Set leave time to 23:59
+          // Set leave time to 23:59 (end of day at midnight)
           const endTime = '23:59';
           row.set('Leave time', endTime);
 
@@ -1191,70 +1191,179 @@ class SchedulerService {
 
         if (!telegramId && !name) continue;
 
-        // Find employee in monthly report
+        // Find employee in monthly report (note: column is 'Telegram ID' not 'Telegram Id')
         let monthlyRow = monthlyRows.find(row => {
-          const rowTelegramId = (row.get('Telegram Id') || '').toString().trim();
+          const rowTelegramId = (row.get('Telegram ID') || '').toString().trim();
           const rowName = row.get('Name') || '';
           return (telegramId && rowTelegramId === telegramId) || rowName === name;
         });
 
-        // If employee not in monthly report, add them
         if (!monthlyRow) {
-          logger.info(`Adding new employee to monthly report: ${name}`);
-          monthlyRow = await monthlySheet.addRow({
-            'Name': name,
-            'Telegram Id': telegramId,
-            'Rating': '10.0',
-            'Worked days': '0',
-            'Late days': '0',
-            'Absent days': '0',
-            'Total hours': '0',
-            'Required hours': '0',
-            'Deficit hours': '0',
-            'Status': 'Active'
-          });
-          await monthlyRow.save();
-          // Reload to get the new row
-          const updatedRows = await monthlySheet.getRows();
-          monthlyRow = updatedRows[updatedRows.length - 1];
+          logger.warn(`Employee ${name} not found in monthly report - skipping`);
+          continue;
         }
 
-        // Update statistics
+        // Get daily data
         const hoursWorked = parseFloat(dailyRow.get('Hours worked') || '0');
         const cameOnTime = dailyRow.get('Came on time') || '';
         const absent = dailyRow.get('Absent') || '';
-        const point = parseFloat(dailyRow.get('Point') || '0');
-
-        // Update worked days
         const whenCome = dailyRow.get('When come') || '';
-        if (whenCome.trim() || absent.toLowerCase() === 'yes') {
-          const currentWorkedDays = parseInt(monthlyRow.get('Worked days') || '0');
-          monthlyRow.set('Worked days', currentWorkedDays + 1);
+        const willBeLate = dailyRow.get('will be late') || '';
+        const leftEarly = dailyRow.get('Left early') || '';
+        const point = parseFloat(dailyRow.get('Point') || '0');
+        const penaltyMinutes = parseFloat(dailyRow.get('Penalty minutes') || '0');
+        const remainingHours = parseFloat(dailyRow.get('Remaining hours to work') || '0');
+
+        // Get required hours for this day from roster
+        let requiredHoursDaily = 0;
+        const workSchedule = monthlyRow.get('Work Schedule') || '';
+        if (workSchedule && whenCome.trim()) {
+          // Parse work schedule (e.g., "09:00-18:00")
+          const scheduleMatch = workSchedule.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+          if (scheduleMatch) {
+            const startHour = parseInt(scheduleMatch[1]);
+            const startMin = parseInt(scheduleMatch[2]);
+            const endHour = parseInt(scheduleMatch[3]);
+            const endMin = parseInt(scheduleMatch[4]);
+            const startMinutes = startHour * 60 + startMin;
+            const endMinutes = endHour * 60 + endMin;
+            requiredHoursDaily = (endMinutes - startMinutes) / 60;
+          }
         }
 
-        // Update late days
-        if (cameOnTime.toLowerCase() === 'false' || cameOnTime.toLowerCase() === 'no') {
-          const currentLateDays = parseInt(monthlyRow.get('Late days') || '0');
-          monthlyRow.set('Late days', currentLateDays + 1);
+        // Update Days Worked
+        if (whenCome.trim()) {
+          const current = parseInt(monthlyRow.get('Days Worked') || '0');
+          monthlyRow.set('Days Worked', current + 1);
         }
 
-        // Update absent days
-        if (absent.toLowerCase() === 'yes') {
-          const currentAbsentDays = parseInt(monthlyRow.get('Absent days') || '0');
-          monthlyRow.set('Absent days', currentAbsentDays + 1);
+        // Update Days Absent
+        if (absent.toLowerCase() === 'yes' || absent.toLowerCase() === 'true') {
+          const current = parseInt(monthlyRow.get('Days Absent') || '0');
+          monthlyRow.set('Days Absent', current + 1);
+
+          // Check if notified or silent
+          if (willBeLate.toLowerCase() === 'yes') {
+            const notified = parseInt(monthlyRow.get('Days Absent (Notified)') || '0');
+            monthlyRow.set('Days Absent (Notified)', notified + 1);
+          } else {
+            const silent = parseInt(monthlyRow.get('Days Absent (Silent)') || '0');
+            monthlyRow.set('Days Absent (Silent)', silent + 1);
+          }
         }
 
-        // Update total hours
-        const currentTotalHours = parseFloat(monthlyRow.get('Total hours') || '0');
-        monthlyRow.set('Total hours', (currentTotalHours + hoursWorked).toFixed(2));
+        // Update On Time / Late Arrivals
+        if (whenCome.trim()) {
+          if (cameOnTime.toLowerCase() === 'true' || cameOnTime.toLowerCase() === 'yes' || cameOnTime === '') {
+            const onTime = parseInt(monthlyRow.get('On Time Arrivals') || '0');
+            monthlyRow.set('On Time Arrivals', onTime + 1);
+          } else {
+            // Late arrival
+            if (willBeLate.toLowerCase() === 'yes') {
+              const lateNotified = parseInt(monthlyRow.get('Late Arrivals (Notified)') || '0');
+              monthlyRow.set('Late Arrivals (Notified)', lateNotified + 1);
+            } else {
+              const lateSilent = parseInt(monthlyRow.get('Late Arrivals (Silent)') || '0');
+              monthlyRow.set('Late Arrivals (Silent)', lateSilent + 1);
+            }
+          }
+        }
 
-        // Update rating
-        const currentRating = parseFloat(monthlyRow.get('Rating') || '10.0');
+        // Update Early Departures
+        if (leftEarly.toLowerCase() === 'yes' || leftEarly.toLowerCase() === 'true') {
+          const earlyDep = parseInt(monthlyRow.get('Early Departures') || '0');
+          monthlyRow.set('Early Departures', earlyDep + 1);
+        }
+
+        // Update Total Hours Worked
+        const currentHours = parseFloat(monthlyRow.get('Total Hours Worked') || '0');
+        monthlyRow.set('Total Hours Worked', (currentHours + hoursWorked).toFixed(2));
+
+        // Update Total Hours Required
+        const currentRequired = parseFloat(monthlyRow.get('Total Hours Required') || '0');
+        monthlyRow.set('Total Hours Required', (currentRequired + requiredHoursDaily).toFixed(2));
+
+        // Update Total Penalty Minutes
+        const currentPenalty = parseFloat(monthlyRow.get('Total Penalty Minutes') || '0');
+        monthlyRow.set('Total Penalty Minutes', (currentPenalty + penaltyMinutes).toFixed(0));
+
+        // Calculate deficit/surplus for this day
+        const dayDeficitSurplus = hoursWorked - requiredHoursDaily;
+        const dayDeficitSurplusMinutes = Math.round(dayDeficitSurplus * 60);
+
+        // Update Deficit/Surplus Minutes
+        if (dayDeficitSurplusMinutes < 0) {
+          // Deficit
+          const currentDeficit = parseFloat(monthlyRow.get('Total Deficit Minutes') || '0');
+          monthlyRow.set('Total Deficit Minutes', (currentDeficit + Math.abs(dayDeficitSurplusMinutes)).toFixed(0));
+        } else if (dayDeficitSurplusMinutes > 0) {
+          // Surplus
+          const currentSurplus = parseFloat(monthlyRow.get('Total Surplus Minutes') || '0');
+          monthlyRow.set('Total Surplus Minutes', (currentSurplus + dayDeficitSurplusMinutes).toFixed(0));
+        }
+
+        // Calculate Net Balance (Total Surplus - Total Deficit - Total Penalty)
+        const totalDeficit = parseFloat(monthlyRow.get('Total Deficit Minutes') || '0');
+        const totalSurplus = parseFloat(monthlyRow.get('Total Surplus Minutes') || '0');
+        const totalPenaltyMins = parseFloat(monthlyRow.get('Total Penalty Minutes') || '0');
+        const netBalanceMinutes = totalSurplus - totalDeficit - totalPenaltyMins;
+        monthlyRow.set('Net Balance Minutes', netBalanceMinutes.toFixed(0));
+
+        // Convert to Hours:Minutes format
+        const absMinutes = Math.abs(netBalanceMinutes);
+        const hours = Math.floor(absMinutes / 60);
+        const minutes = Math.round(absMinutes % 60);
+        const sign = netBalanceMinutes < 0 ? '-' : '+';
+        monthlyRow.set('Net Balance (Hours)', `${sign}${hours}:${minutes.toString().padStart(2, '0')}`);
+
+        // Set Balance Status
+        if (netBalanceMinutes > 60) {
+          monthlyRow.set('Balance Status', '🟢 Surplus');
+        } else if (netBalanceMinutes < -60) {
+          monthlyRow.set('Balance Status', '🔴 Deficit');
+        } else {
+          monthlyRow.set('Balance Status', '⚪ Balanced');
+        }
+
+        // Update Hours Deficit/Surplus (in hours)
+        monthlyRow.set('Hours Deficit/Surplus', (netBalanceMinutes / 60).toFixed(2));
+
+        // Update Total Points
+        const currentPoints = parseFloat(monthlyRow.get('Total Points') || '0');
+        monthlyRow.set('Total Points', (currentPoints + point).toFixed(2));
+
+        // Update Rating (0-10)
+        const currentRating = parseFloat(monthlyRow.get('Rating (0-10)') || '0');
         const newRating = Math.max(0, Math.min(10, currentRating + point));
-        monthlyRow.set('Rating', newRating.toFixed(1));
+        monthlyRow.set('Rating (0-10)', newRating.toFixed(1));
+
+        // Calculate Attendance Rate %
+        const daysWorked = parseInt(monthlyRow.get('Days Worked') || '0');
+        const daysAbsent = parseInt(monthlyRow.get('Days Absent') || '0');
+        const totalDays = daysWorked + daysAbsent;
+        const attendanceRate = totalDays > 0 ? ((daysWorked / totalDays) * 100).toFixed(1) : '0.0';
+        monthlyRow.set('Attendance Rate %', attendanceRate);
+
+        // Calculate On-Time Rate %
+        const onTimeArrivals = parseInt(monthlyRow.get('On Time Arrivals') || '0');
+        const onTimeRate = daysWorked > 0 ? ((onTimeArrivals / daysWorked) * 100).toFixed(1) : '0.0';
+        monthlyRow.set('On-Time Rate %', onTimeRate);
+
+        // Set Rating Zone
+        const ratingValue = parseFloat(monthlyRow.get('Rating (0-10)') || '0');
+        if (ratingValue >= Config.GREEN_ZONE_MIN) {
+          monthlyRow.set('Rating Zone', '🟢 Отлично');
+        } else if (ratingValue >= Config.YELLOW_ZONE_MIN) {
+          monthlyRow.set('Rating Zone', '🟡 Норма');
+        } else {
+          monthlyRow.set('Rating Zone', '🔴 Риск');
+        }
+
+        // Update Last Updated
+        monthlyRow.set('Last Updated', moment.tz(Config.TIMEZONE).format('YYYY-MM-DD HH:mm:ss'));
 
         await monthlyRow.save();
-        logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h, rating: ${newRating.toFixed(1)}`);
+        logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h/${requiredHoursDaily.toFixed(2)}h required, penalty: ${penaltyMinutes}min, balance: ${sign}${hours}:${minutes.toString().padStart(2, '0')}, rating: ${newRating.toFixed(1)}`);
       }
 
       logger.info(`Successfully transferred data from ${dateStr} to ${reportSheetName}`);
@@ -1266,7 +1375,7 @@ class SchedulerService {
   }
 
   /**
-   * Send daily report to Telegram group
+   * Send daily report to Telegram group as Excel file
    * @param {string} dateStr - Date in YYYY-MM-DD format
    */
   async sendDailyReportToGroup(dateStr) {
@@ -1290,91 +1399,101 @@ class SchedulerService {
         return;
       }
 
-      // Generate statistics
+      // Use xlsx library to create Excel file from data
+      const XLSX = require('xlsx');
+      const fs = require('fs');
+      const path = require('path');
+      const os = require('os');
+
+      // Create workbook
+      const workbook = XLSX.utils.book_new();
+
+      // Get headers
+      const headers = worksheet.headerValues;
+
+      // Prepare data array
+      const data = [headers]; // First row is headers
+
+      // Add all rows
+      for (const row of rows) {
+        const rowData = headers.map(header => {
+          const value = row.get(header);
+          return value !== undefined ? value : '';
+        });
+        data.push(rowData);
+      }
+
+      // Create worksheet from data
+      const ws = XLSX.utils.aoa_to_sheet(data);
+
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(workbook, ws, dateStr);
+
+      // Create temporary file path
+      const tempDir = os.tmpdir();
+      const fileName = `attendance_${dateStr}.xlsx`;
+      const filePath = path.join(tempDir, fileName);
+
+      // Write Excel file
+      XLSX.writeFile(workbook, filePath);
+      logger.info(`Created Excel file: ${filePath}`);
+
+      // Calculate statistics for caption
       let presentCount = 0;
       let lateCount = 0;
       let absentCount = 0;
-      let leftEarlyCount = 0;
       let totalHoursWorked = 0;
 
-      const employeeStats = [];
-
       for (const row of rows) {
-        const name = row.get('Name') || '';
         const whenCome = row.get('When come') || '';
-        const leaveTime = row.get('Leave time') || '';
-        const cameOnTime = row.get('Came on time') || '';
         const absent = row.get('Absent') || '';
-        const leftEarly = row.get('Left early') || '';
+        const cameOnTime = row.get('Came on time') || '';
         const hoursWorked = parseFloat(row.get('Hours worked') || '0');
 
         if (whenCome.trim()) {
           presentCount++;
           totalHoursWorked += hoursWorked;
-
-          let status = '✅';
           if (cameOnTime.toLowerCase() === 'false' || cameOnTime.toLowerCase() === 'no') {
-            status = '⚠️';
             lateCount++;
           }
-          if (leftEarly.toLowerCase() === 'yes') {
-            status = '🟡';
-            leftEarlyCount++;
-          }
-
-          employeeStats.push({
-            name,
-            status,
-            arrival: whenCome,
-            departure: leaveTime || '-',
-            hours: hoursWorked.toFixed(1)
-          });
         } else if (absent.toLowerCase() === 'yes') {
           absentCount++;
-          employeeStats.push({
-            name,
-            status: '❌',
-            arrival: 'Отсутствует',
-            departure: '-',
-            hours: '0'
-          });
         }
       }
 
-      // Format report
       const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY (dddd)');
-      let report = `📊 <b>ОТЧЁТ ЗА ${formattedDate.toUpperCase()}</b>\n\n`;
+      const caption =
+        `📊 <b>ОТЧЁТ ЗА ${formattedDate.toUpperCase()}</b>\n\n` +
+        `✅ Присутствовали: ${presentCount}\n` +
+        `⚠️ Опоздали: ${lateCount}\n` +
+        `❌ Отсутствовали: ${absentCount}\n` +
+        `⏱ Всего часов: ${totalHoursWorked.toFixed(1)}\n\n` +
+        `📄 Полный отчёт во вложении\n` +
+        `🤖 Данные архивированы автоматически`;
 
-      report += `<b>📈 Статистика:</b>\n`;
-      report += `✅ Присутствовали: ${presentCount}\n`;
-      report += `⚠️ Опоздали: ${lateCount}\n`;
-      report += `❌ Отсутствовали: ${absentCount}\n`;
-      report += `🟡 Ушли раньше: ${leftEarlyCount}\n`;
-      report += `⏱ Всего часов: ${totalHoursWorked.toFixed(1)}\n\n`;
-
-      report += `<b>👥 Детали по сотрудникам:</b>\n`;
-      report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-
-      for (const emp of employeeStats) {
-        report += `${emp.status} <b>${emp.name}</b>\n`;
-        report += `   Приход: ${emp.arrival} | Уход: ${emp.departure}\n`;
-        report += `   Часов: ${emp.hours}\n\n`;
-      }
-
-      report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-      report += `📅 Данные за ${dateStr} архивированы\n`;
-      report += `🤖 Отчёт создан автоматически`;
-
-      // Send to group
-      await this.bot.telegram.sendMessage(
+      // Send the Excel file to the group
+      await this.bot.telegram.sendDocument(
         Config.DAILY_REPORT_GROUP_ID,
-        report,
-        { parse_mode: 'HTML' }
+        { source: filePath, filename: fileName },
+        {
+          caption: caption,
+          parse_mode: 'HTML'
+        }
       );
 
-      logger.info(`Daily report sent to group ${Config.DAILY_REPORT_GROUP_ID}`);
+      // Clean up temporary file
+      fs.unlink(filePath, (err) => {
+        if (err) {
+          logger.warn(`Failed to delete temp file ${filePath}: ${err.message}`);
+        } else {
+          logger.info(`Cleaned up temp file: ${filePath}`);
+        }
+      });
+
+      logger.info(`Daily report (Excel file) sent to group ${Config.DAILY_REPORT_GROUP_ID}`);
     } catch (error) {
       logger.error(`Error sending daily report to group: ${error.message}`);
+      logger.error(error.stack);
     }
   }
 
