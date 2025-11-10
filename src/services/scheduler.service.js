@@ -16,6 +16,89 @@ class SchedulerService {
   }
 
   /**
+   * Retry operation with exponential backoff for quota errors
+   * @param {Function} operation - Async operation to retry
+   * @param {number} maxRetries - Maximum number of retries
+   * @returns {Promise} Result of operation
+   */
+  async retryOperation(operation, maxRetries = 3) {
+    let lastError;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+
+        // Check if it's a quota error (429)
+        const isQuotaError = error.message && (
+          error.message.includes('429') ||
+          error.message.includes('Quota exceeded') ||
+          error.message.includes('quota metric')
+        );
+
+        // Only retry on quota errors
+        if (!isQuotaError || attempt === maxRetries) {
+          throw error;
+        }
+
+        // Exponential backoff: 2s, 4s, 8s (longer than sheets service)
+        const delay = 2000 * Math.pow(2, attempt);
+        logger.warn(`Quota error in scheduler, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * Retry Telegram API operation with exponential backoff for network errors
+   * @param {Function} operation - Async operation to retry
+   * @param {number} maxRetries - Maximum number of retries
+   * @returns {Promise} Result of operation
+   */
+  async retryTelegramOperation(operation, maxRetries = 3) {
+    let lastError;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+
+        // Check if it's a network error that should be retried
+        const isNetworkError = error.message && (
+          error.message.includes('EADDRNOTAVAIL') ||  // Address not available
+          error.message.includes('ECONNRESET') ||     // Connection reset
+          error.message.includes('ETIMEDOUT') ||      // Connection timeout
+          error.message.includes('ENOTFOUND') ||      // DNS lookup failed
+          error.message.includes('EAI_AGAIN') ||      // DNS temporary failure
+          error.message.includes('ECONNREFUSED') ||   // Connection refused
+          error.message.includes('socket hang up') || // Socket closed unexpectedly
+          error.code === 'EADDRNOTAVAIL' ||
+          error.code === 'ECONNRESET' ||
+          error.code === 'ETIMEDOUT' ||
+          error.code === 'ENOTFOUND' ||
+          error.code === 'ECONNREFUSED'
+        );
+
+        // Only retry on network errors
+        if (!isNetworkError || attempt === maxRetries) {
+          throw error;
+        }
+
+        // Exponential backoff: 1s, 2s, 4s for network errors
+        const delay = 1000 * Math.pow(2, attempt);
+        logger.warn(`Network error in Telegram API call, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries}): ${error.message}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
    * Initialize scheduler with bot instance
    * @param {Object} bot - Telegraf bot instance
    */
@@ -124,15 +207,27 @@ class SchedulerService {
         return;
       }
 
-      // Get today's attendance sheet
-      const worksheet = await sheetsService.getWorksheet(today);
-      await worksheet.loadHeaderRow();
-      const rows = await worksheet.getRows();
+      // Get today's attendance sheet with retry logic
+      const worksheet = await this.retryOperation(async () => {
+        const ws = await sheetsService.getWorksheet(today);
+        await ws.loadHeaderRow();
+        return ws;
+      });
 
-      // Get roster to check work times
-      const roster = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
-      await roster.loadHeaderRow();
-      const rosterRows = await roster.getRows();
+      const rows = await this.retryOperation(async () => {
+        return await worksheet.getRows();
+      });
+
+      // Get roster to check work times with retry logic
+      const roster = await this.retryOperation(async () => {
+        const r = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
+        await r.loadHeaderRow();
+        return r;
+      });
+
+      const rosterRows = await this.retryOperation(async () => {
+        return await roster.getRows();
+      });
 
       for (const row of rows) {
         const name = row.get('Name') || '';
@@ -226,30 +321,30 @@ class SchedulerService {
           if (currentMinute === reminder1Time && reminder1Sent.toLowerCase() !== 'true') {
             await this.sendWorkReminder(telegramId, name, 1, reminderTime);
             row.set('reminder_1_sent', 'true');
-            await row.save();
+            await this.retryOperation(async () => await row.save());
             logger.info(`Sent reminder 1 to ${name} (${telegramId}) at ${currentMinute}`);
             // Add delay to avoid rate limit
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
 
           // Check and send reminder 2 (at work time)
           if (currentMinute === reminder2Time && reminder2Sent.toLowerCase() !== 'true') {
             await this.sendWorkReminder(telegramId, name, 2, reminderTime);
             row.set('reminder_2_sent', 'true');
-            await row.save();
+            await this.retryOperation(async () => await row.save());
             logger.info(`Sent reminder 2 to ${name} (${telegramId}) at ${currentMinute}`);
             // Add delay to avoid rate limit
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
 
           // Check and send reminder 3 (15 min after)
           if (currentMinute === reminder3Time && reminder3Sent.toLowerCase() !== 'true') {
             await this.sendWorkReminder(telegramId, name, 3, reminderTime);
             row.set('reminder_3_sent', 'true');
-            await row.save();
+            await this.retryOperation(async () => await row.save());
             logger.info(`Sent reminder 3 to ${name} (${telegramId}) at ${currentMinute}`);
             // Add delay to avoid rate limit
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
         }
 
@@ -260,11 +355,13 @@ class SchedulerService {
           // Check if they haven't notified they'll be late and haven't been marked yet
           const alreadyMarkedLate = cameOnTime.toLowerCase() === 'false' || cameOnTime === 'No';
           const notifiedLate = willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true';
+          const isAbsentNow = isAbsent.toLowerCase() === 'yes' || isAbsent.toLowerCase() === 'true';
 
-          if (!alreadyMarkedLate && !notifiedLate) {
+          // Don't mark late if already marked late, notified, or marked absent (fraud)
+          if (!alreadyMarkedLate && !notifiedLate && !isAbsentNow) {
             // Automatically mark as late (silent - no notification given)
             row.set('Came on time', 'false');
-            await row.save();
+            await this.retryOperation(async () => await row.save());
 
             // Log the silent late event
             const CalculatorService = require('./calculator.service');
@@ -277,23 +374,25 @@ class SchedulerService {
               ratingImpact
             );
 
-            // Send notification to employee
+            // Send notification to employee with retry logic
             try {
-              await this.bot.telegram.sendMessage(
-                telegramId,
-                `⚠️ Вы автоматически отмечены как опоздавший\n\n` +
-                `Вы не пришли на работу вовремя (${startTime}).\n` +
-                `Прошло уже ${minutesSinceStart} минут с начала рабочего дня.\n\n` +
-                `Пожалуйста, отметьте свой приход, когда придёте.`
-              );
+              await this.retryTelegramOperation(async () => {
+                await this.bot.telegram.sendMessage(
+                  telegramId,
+                  `⚠️ Вы автоматически отмечены как опоздавший\n\n` +
+                  `Вы не пришли на работу вовремя (${startTime}).\n` +
+                  `Прошло уже ${minutesSinceStart} минут с начала рабочего дня.\n\n` +
+                  `Пожалуйста, отметьте свой приход, когда придёте.`
+                );
+              });
             } catch (err) {
-              logger.error(`Failed to send auto-late notification to ${telegramId}: ${err.message}`);
+              logger.error(`Failed to send auto-late notification to ${telegramId} after retries: ${err.message}`);
             }
 
             logger.info(`Automatically marked ${name} (${telegramId}) as late (${minutesSinceStart} min)`);
 
-            // Add delay to avoid hitting Google API rate limit
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Add delay to avoid hitting Google API rate limit and prevent network exhaustion
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Increased from 1s to 2s
           }
         }
       }
@@ -347,31 +446,33 @@ class SchedulerService {
             const Markup = require('telegraf').Markup;
 
             // Send reminder with interactive buttons
-            await this.bot.telegram.sendMessage(
-              telegramId,
-              `⏰ Напоминание о возвращении\n\n` +
-              `У вас осталось 15 минут до времени возвращения.\n` +
-              `Причина выхода: ${lastReason}\n` +
-              `Ожидаемое возвращение: ${expectedReturnTime}\n\n` +
-              `Вам нужно больше времени?`,
-              Markup.inlineKeyboard([
-                [
-                  Markup.button.callback('✅ Вернусь вовремя', 'temp_exit_confirm_return'),
-                  Markup.button.callback('⏱ +15 мин', 'temp_exit_extend:15')
-                ],
-                [
-                  Markup.button.callback('⏱ +30 мин', 'temp_exit_extend:30'),
-                  Markup.button.callback('⏱ +45 мин', 'temp_exit_extend:45')
-                ],
-                [
-                  Markup.button.callback('⏱ +1 час', 'temp_exit_extend:60')
-                ]
-              ])
-            );
+            await this.retryTelegramOperation(async () => {
+              await this.bot.telegram.sendMessage(
+                telegramId,
+                `⏰ Напоминание о возвращении\n\n` +
+                `У вас осталось 15 минут до времени возвращения.\n` +
+                `Причина выхода: ${lastReason}\n` +
+                `Ожидаемое возвращение: ${expectedReturnTime}\n\n` +
+                `Вам нужно больше времени?`,
+                Markup.inlineKeyboard([
+                  [
+                    Markup.button.callback('✅ Вернусь вовремя', 'temp_exit_confirm_return'),
+                    Markup.button.callback('⏱ +15 мин', 'temp_exit_extend:15')
+                  ],
+                  [
+                    Markup.button.callback('⏱ +30 мин', 'temp_exit_extend:30'),
+                    Markup.button.callback('⏱ +45 мин', 'temp_exit_extend:45')
+                  ],
+                  [
+                    Markup.button.callback('⏱ +1 час', 'temp_exit_extend:60')
+                  ]
+                ])
+              );
+            });
 
             // Mark reminder as sent
             row.set('Temp exit remind sent', 'true');
-            await row.save();
+            await this.retryOperation(async () => await row.save());
 
             logger.info(`Sent temp exit return reminder to ${name} (${telegramId}) - 15 min before ${expectedReturnTime}`);
             // Add delay to avoid rate limit
@@ -473,15 +574,17 @@ class SchedulerService {
               message += `Не забудьте отметить уход командой "- сообщение"`;
             }
 
-            await this.bot.telegram.sendMessage(telegramId, message);
+            await this.retryTelegramOperation(async () => {
+              await this.bot.telegram.sendMessage(telegramId, message);
+            });
 
             // Mark reminder as sent
             row.set('departure_reminder_sent', 'true');
-            await row.save();
+            await this.retryOperation(async () => await row.save());
 
             logger.info(`Sent departure reminder to ${name} (${telegramId}) for ${requiredEndTime}`);
-            // Add delay to avoid rate limit
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // Add delay to avoid rate limit and network exhaustion
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Increased from 500ms to 2s
           } catch (err) {
             logger.error(`Failed to send departure reminder to ${telegramId}: ${err.message}`);
           }
@@ -527,9 +630,11 @@ class SchedulerService {
                  `Не забудьте отметить свой приход.`;
       }
 
-      await this.bot.telegram.sendMessage(telegramId, message);
+      await this.retryTelegramOperation(async () => {
+        await this.bot.telegram.sendMessage(telegramId, message);
+      });
     } catch (error) {
-      logger.error(`Error sending reminder to ${telegramId}: ${error.message}`);
+      logger.error(`Error sending reminder to ${telegramId} after retries: ${error.message}`);
     }
   }
 
@@ -881,17 +986,22 @@ class SchedulerService {
       // Send to all admins
       for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
         try {
-          await this.bot.telegram.sendMessage(
-            adminId,
-            `📊 Месячный отчёт за ${yearMonth}\n\n` +
-            `🟢 Зелёная зона: ${greenCount}\n` +
-            `🟡 Жёлтая зона: ${yellowCount}\n` +
-            `🔴 Красная зона: ${redCount}\n\n` +
-            `Используйте кнопку "📈 Отчёт за месяц" для получения полного отчёта.`
-          );
+          await this.retryTelegramOperation(async () => {
+            await this.bot.telegram.sendMessage(
+              adminId,
+              `📊 Месячный отчёт за ${yearMonth}\n\n` +
+              `🟢 Зелёная зона: ${greenCount}\n` +
+              `🟡 Жёлтая зона: ${yellowCount}\n` +
+              `🔴 Красная зона: ${redCount}\n\n` +
+              `Используйте кнопку "📈 Отчёт за месяц" для получения полного отчёта.`
+            );
+          });
           logger.info(`Monthly report sent to admin ${adminId}`);
+
+          // Add delay between admin notifications
+          await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (err) {
-          logger.error(`Failed to send monthly report to admin ${adminId}: ${err.message}`);
+          logger.error(`Failed to send monthly report to admin ${adminId} after retries: ${err.message}`);
         }
       }
 
@@ -969,25 +1079,27 @@ class SchedulerService {
           noShowCount++;
           logger.warn(`Marked ${name} (${telegramId}) as no-show with ${Config.NO_SHOW_PENALTY} points`);
 
-          // Add delay to avoid rate limit when processing multiple no-shows
-          await new Promise(resolve => setTimeout(resolve, 1000));
-
           // Send notification to user if telegram ID exists
           if (telegramId && this.bot) {
             try {
-              await this.bot.telegram.sendMessage(
-                telegramId,
-                `⚠️ ВЫ ПОЛУЧИЛИ ШТРАФ\n\n` +
-                `❌ Причина: Отсутствие без уведомления\n` +
-                `📅 Дата: ${moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY')}\n\n` +
-                `Вы не отметили приход, не уведомили об опоздании и не отметили отсутствие.\n\n` +
-                `🔴 Штраф: ${Config.NO_SHOW_PENALTY} баллов\n\n` +
-                `Пожалуйста, всегда уведомляйте о своём отсутствии!`
-              );
+              await this.retryTelegramOperation(async () => {
+                await this.bot.telegram.sendMessage(
+                  telegramId,
+                  `⚠️ ВЫ ПОЛУЧИЛИ ШТРАФ\n\n` +
+                  `❌ Причина: Отсутствие без уведомления\n` +
+                  `📅 Дата: ${moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY')}\n\n` +
+                  `Вы не отметили приход, не уведомили об опоздании и не отметили отсутствие.\n\n` +
+                  `🔴 Штраф: ${Config.NO_SHOW_PENALTY} баллов\n\n` +
+                  `Пожалуйста, всегда уведомляйте о своём отсутствии!`
+                );
+              });
             } catch (msgError) {
-              logger.error(`Failed to send no-show notification to ${telegramId}: ${msgError.message}`);
+              logger.error(`Failed to send no-show notification to ${telegramId} after retries: ${msgError.message}`);
             }
           }
+
+          // Add delay to avoid rate limit and network exhaustion when processing multiple no-shows
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Increased from 1s to 2s
         }
       }
 
@@ -1006,7 +1118,7 @@ class SchedulerService {
 
   /**
    * Setup end-of-day archiving process
-   * Runs at midnight (00:00) to archive the day and prepare for new day
+   * Runs at midnight (00:00) to archive the previous day and prepare for new day
    */
   setupEndOfDayArchiving() {
     // Run at 00:00 every day (midnight)
@@ -1105,7 +1217,7 @@ class SchedulerService {
         if (whenCome.trim() && !leaveTime.trim() && telegramId.trim()) {
           overnightCount++;
 
-          // Set leave time to 23:59
+          // Set leave time to 23:59 (end of day at midnight)
           const endTime = '23:59';
           row.set('Leave time', endTime);
 
@@ -1126,24 +1238,26 @@ class SchedulerService {
               const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY');
               const formattedTomorrow = moment.tz(tomorrow, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
 
-              await this.bot.telegram.sendMessage(
-                telegramId,
-                `⚠️ Ваше рабочее время автоматически завершено\n\n` +
-                `📅 Дата: ${formattedDate}\n` +
-                `🕐 Время окончания: ${endTime}\n` +
-                `⏱ Отработано часов: ${hoursWorked.toFixed(2)}\n\n` +
-                `Если вы всё ещё работаете ночную смену, нажмите кнопку ниже, чтобы отметить приход на новый день (${formattedTomorrow}):`,
-                Markup.inlineKeyboard([
-                  [Markup.button.callback('✅ Я всё ещё здесь - Отметить приход', `overnight_still_working:${tomorrow}`)]
-                ])
-              );
+              await this.retryTelegramOperation(async () => {
+                await this.bot.telegram.sendMessage(
+                  telegramId,
+                  `⚠️ Ваше рабочее время автоматически завершено\n\n` +
+                  `📅 Дата: ${formattedDate}\n` +
+                  `🕐 Время окончания: ${endTime}\n` +
+                  `⏱ Отработано часов: ${hoursWorked.toFixed(2)}\n\n` +
+                  `Если вы всё ещё работаете ночную смену, нажмите кнопку ниже, чтобы отметить приход на новый день (${formattedTomorrow}):`,
+                  Markup.inlineKeyboard([
+                    [Markup.button.callback('✅ Я всё ещё здесь - Отметить приход', `overnight_still_working:${tomorrow}`)]
+                  ])
+                );
+              });
             } catch (msgError) {
-              logger.error(`Failed to send overnight notification to ${telegramId}: ${msgError.message}`);
+              logger.error(`Failed to send overnight notification to ${telegramId} after retries: ${msgError.message}`);
             }
           }
 
-          // Add delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 500));
+          // Add delay to avoid rate limiting and network exhaustion
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Increased from 500ms to 2s
         }
       }
 
@@ -1191,70 +1305,179 @@ class SchedulerService {
 
         if (!telegramId && !name) continue;
 
-        // Find employee in monthly report
+        // Find employee in monthly report (note: column is 'Telegram ID' not 'Telegram Id')
         let monthlyRow = monthlyRows.find(row => {
-          const rowTelegramId = (row.get('Telegram Id') || '').toString().trim();
+          const rowTelegramId = (row.get('Telegram ID') || '').toString().trim();
           const rowName = row.get('Name') || '';
           return (telegramId && rowTelegramId === telegramId) || rowName === name;
         });
 
-        // If employee not in monthly report, add them
         if (!monthlyRow) {
-          logger.info(`Adding new employee to monthly report: ${name}`);
-          monthlyRow = await monthlySheet.addRow({
-            'Name': name,
-            'Telegram Id': telegramId,
-            'Rating': '10.0',
-            'Worked days': '0',
-            'Late days': '0',
-            'Absent days': '0',
-            'Total hours': '0',
-            'Required hours': '0',
-            'Deficit hours': '0',
-            'Status': 'Active'
-          });
-          await monthlyRow.save();
-          // Reload to get the new row
-          const updatedRows = await monthlySheet.getRows();
-          monthlyRow = updatedRows[updatedRows.length - 1];
+          logger.warn(`Employee ${name} not found in monthly report - skipping`);
+          continue;
         }
 
-        // Update statistics
+        // Get daily data
         const hoursWorked = parseFloat(dailyRow.get('Hours worked') || '0');
         const cameOnTime = dailyRow.get('Came on time') || '';
         const absent = dailyRow.get('Absent') || '';
-        const point = parseFloat(dailyRow.get('Point') || '0');
-
-        // Update worked days
         const whenCome = dailyRow.get('When come') || '';
-        if (whenCome.trim() || absent.toLowerCase() === 'yes') {
-          const currentWorkedDays = parseInt(monthlyRow.get('Worked days') || '0');
-          monthlyRow.set('Worked days', currentWorkedDays + 1);
+        const willBeLate = dailyRow.get('will be late') || '';
+        const leftEarly = dailyRow.get('Left early') || '';
+        const point = parseFloat(dailyRow.get('Point') || '0');
+        const penaltyMinutes = parseFloat(dailyRow.get('Penalty minutes') || '0');
+        const remainingHours = parseFloat(dailyRow.get('Remaining hours to work') || '0');
+
+        // Get required hours for this day from roster
+        let requiredHoursDaily = 0;
+        const workSchedule = monthlyRow.get('Work Schedule') || '';
+        if (workSchedule && whenCome.trim()) {
+          // Parse work schedule (e.g., "09:00-18:00")
+          const scheduleMatch = workSchedule.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+          if (scheduleMatch) {
+            const startHour = parseInt(scheduleMatch[1]);
+            const startMin = parseInt(scheduleMatch[2]);
+            const endHour = parseInt(scheduleMatch[3]);
+            const endMin = parseInt(scheduleMatch[4]);
+            const startMinutes = startHour * 60 + startMin;
+            const endMinutes = endHour * 60 + endMin;
+            requiredHoursDaily = (endMinutes - startMinutes) / 60;
+          }
         }
 
-        // Update late days
-        if (cameOnTime.toLowerCase() === 'false' || cameOnTime.toLowerCase() === 'no') {
-          const currentLateDays = parseInt(monthlyRow.get('Late days') || '0');
-          monthlyRow.set('Late days', currentLateDays + 1);
+        // Update Days Worked
+        if (whenCome.trim()) {
+          const current = parseInt(monthlyRow.get('Days Worked') || '0');
+          monthlyRow.set('Days Worked', current + 1);
         }
 
-        // Update absent days
-        if (absent.toLowerCase() === 'yes') {
-          const currentAbsentDays = parseInt(monthlyRow.get('Absent days') || '0');
-          monthlyRow.set('Absent days', currentAbsentDays + 1);
+        // Update Days Absent
+        if (absent.toLowerCase() === 'yes' || absent.toLowerCase() === 'true') {
+          const current = parseInt(monthlyRow.get('Days Absent') || '0');
+          monthlyRow.set('Days Absent', current + 1);
+
+          // Check if notified or silent
+          if (willBeLate.toLowerCase() === 'yes') {
+            const notified = parseInt(monthlyRow.get('Days Absent (Notified)') || '0');
+            monthlyRow.set('Days Absent (Notified)', notified + 1);
+          } else {
+            const silent = parseInt(monthlyRow.get('Days Absent (Silent)') || '0');
+            monthlyRow.set('Days Absent (Silent)', silent + 1);
+          }
         }
 
-        // Update total hours
-        const currentTotalHours = parseFloat(monthlyRow.get('Total hours') || '0');
-        monthlyRow.set('Total hours', (currentTotalHours + hoursWorked).toFixed(2));
+        // Update On Time / Late Arrivals
+        if (whenCome.trim()) {
+          if (cameOnTime.toLowerCase() === 'true' || cameOnTime.toLowerCase() === 'yes' || cameOnTime === '') {
+            const onTime = parseInt(monthlyRow.get('On Time Arrivals') || '0');
+            monthlyRow.set('On Time Arrivals', onTime + 1);
+          } else {
+            // Late arrival
+            if (willBeLate.toLowerCase() === 'yes') {
+              const lateNotified = parseInt(monthlyRow.get('Late Arrivals (Notified)') || '0');
+              monthlyRow.set('Late Arrivals (Notified)', lateNotified + 1);
+            } else {
+              const lateSilent = parseInt(monthlyRow.get('Late Arrivals (Silent)') || '0');
+              monthlyRow.set('Late Arrivals (Silent)', lateSilent + 1);
+            }
+          }
+        }
 
-        // Update rating
-        const currentRating = parseFloat(monthlyRow.get('Rating') || '10.0');
+        // Update Early Departures
+        if (leftEarly.toLowerCase() === 'yes' || leftEarly.toLowerCase() === 'true') {
+          const earlyDep = parseInt(monthlyRow.get('Early Departures') || '0');
+          monthlyRow.set('Early Departures', earlyDep + 1);
+        }
+
+        // Update Total Hours Worked
+        const currentHours = parseFloat(monthlyRow.get('Total Hours Worked') || '0');
+        monthlyRow.set('Total Hours Worked', (currentHours + hoursWorked).toFixed(2));
+
+        // Update Total Hours Required
+        const currentRequired = parseFloat(monthlyRow.get('Total Hours Required') || '0');
+        monthlyRow.set('Total Hours Required', (currentRequired + requiredHoursDaily).toFixed(2));
+
+        // Update Total Penalty Minutes
+        const currentPenalty = parseFloat(monthlyRow.get('Total Penalty Minutes') || '0');
+        monthlyRow.set('Total Penalty Minutes', (currentPenalty + penaltyMinutes).toFixed(0));
+
+        // Calculate deficit/surplus for this day
+        const dayDeficitSurplus = hoursWorked - requiredHoursDaily;
+        const dayDeficitSurplusMinutes = Math.round(dayDeficitSurplus * 60);
+
+        // Update Deficit/Surplus Minutes
+        if (dayDeficitSurplusMinutes < 0) {
+          // Deficit
+          const currentDeficit = parseFloat(monthlyRow.get('Total Deficit Minutes') || '0');
+          monthlyRow.set('Total Deficit Minutes', (currentDeficit + Math.abs(dayDeficitSurplusMinutes)).toFixed(0));
+        } else if (dayDeficitSurplusMinutes > 0) {
+          // Surplus
+          const currentSurplus = parseFloat(monthlyRow.get('Total Surplus Minutes') || '0');
+          monthlyRow.set('Total Surplus Minutes', (currentSurplus + dayDeficitSurplusMinutes).toFixed(0));
+        }
+
+        // Calculate Net Balance (Total Surplus - Total Deficit - Total Penalty)
+        const totalDeficit = parseFloat(monthlyRow.get('Total Deficit Minutes') || '0');
+        const totalSurplus = parseFloat(monthlyRow.get('Total Surplus Minutes') || '0');
+        const totalPenaltyMins = parseFloat(monthlyRow.get('Total Penalty Minutes') || '0');
+        const netBalanceMinutes = totalSurplus - totalDeficit - totalPenaltyMins;
+        monthlyRow.set('Net Balance Minutes', netBalanceMinutes.toFixed(0));
+
+        // Convert to Hours:Minutes format
+        const absMinutes = Math.abs(netBalanceMinutes);
+        const hours = Math.floor(absMinutes / 60);
+        const minutes = Math.round(absMinutes % 60);
+        const sign = netBalanceMinutes < 0 ? '-' : '+';
+        monthlyRow.set('Net Balance (Hours)', `${sign}${hours}:${minutes.toString().padStart(2, '0')}`);
+
+        // Set Balance Status
+        if (netBalanceMinutes > 60) {
+          monthlyRow.set('Balance Status', '🟢 Surplus');
+        } else if (netBalanceMinutes < -60) {
+          monthlyRow.set('Balance Status', '🔴 Deficit');
+        } else {
+          monthlyRow.set('Balance Status', '⚪ Balanced');
+        }
+
+        // Update Hours Deficit/Surplus (in hours)
+        monthlyRow.set('Hours Deficit/Surplus', (netBalanceMinutes / 60).toFixed(2));
+
+        // Update Total Points
+        const currentPoints = parseFloat(monthlyRow.get('Total Points') || '0');
+        monthlyRow.set('Total Points', (currentPoints + point).toFixed(2));
+
+        // Update Rating (0-10)
+        const currentRating = parseFloat(monthlyRow.get('Rating (0-10)') || '0');
         const newRating = Math.max(0, Math.min(10, currentRating + point));
-        monthlyRow.set('Rating', newRating.toFixed(1));
+        monthlyRow.set('Rating (0-10)', newRating.toFixed(1));
+
+        // Calculate Attendance Rate %
+        const daysWorked = parseInt(monthlyRow.get('Days Worked') || '0');
+        const daysAbsent = parseInt(monthlyRow.get('Days Absent') || '0');
+        const totalDays = daysWorked + daysAbsent;
+        const attendanceRate = totalDays > 0 ? ((daysWorked / totalDays) * 100).toFixed(1) : '0.0';
+        monthlyRow.set('Attendance Rate %', attendanceRate);
+
+        // Calculate On-Time Rate %
+        const onTimeArrivals = parseInt(monthlyRow.get('On Time Arrivals') || '0');
+        const onTimeRate = daysWorked > 0 ? ((onTimeArrivals / daysWorked) * 100).toFixed(1) : '0.0';
+        monthlyRow.set('On-Time Rate %', onTimeRate);
+
+        // Set Rating Zone
+        const ratingValue = parseFloat(monthlyRow.get('Rating (0-10)') || '0');
+        if (ratingValue >= Config.GREEN_ZONE_MIN) {
+          monthlyRow.set('Rating Zone', '🟢 Отлично');
+        } else if (ratingValue >= Config.YELLOW_ZONE_MIN) {
+          monthlyRow.set('Rating Zone', '🟡 Норма');
+        } else {
+          monthlyRow.set('Rating Zone', '🔴 Риск');
+        }
+
+        // Update Last Updated
+        monthlyRow.set('Last Updated', moment.tz(Config.TIMEZONE).format('YYYY-MM-DD HH:mm:ss'));
 
         await monthlyRow.save();
-        logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h, rating: ${newRating.toFixed(1)}`);
+        logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h/${requiredHoursDaily.toFixed(2)}h required, penalty: ${penaltyMinutes}min, balance: ${sign}${hours}:${minutes.toString().padStart(2, '0')}, rating: ${newRating.toFixed(1)}`);
       }
 
       logger.info(`Successfully transferred data from ${dateStr} to ${reportSheetName}`);
@@ -1266,7 +1489,7 @@ class SchedulerService {
   }
 
   /**
-   * Send daily report to Telegram group
+   * Send daily report to Telegram group as Excel file
    * @param {string} dateStr - Date in YYYY-MM-DD format
    */
   async sendDailyReportToGroup(dateStr) {
@@ -1290,91 +1513,101 @@ class SchedulerService {
         return;
       }
 
-      // Generate statistics
+      // Use xlsx library to create Excel file from data
+      const XLSX = require('xlsx');
+      const fs = require('fs');
+      const path = require('path');
+      const os = require('os');
+
+      // Create workbook
+      const workbook = XLSX.utils.book_new();
+
+      // Get headers
+      const headers = worksheet.headerValues;
+
+      // Prepare data array
+      const data = [headers]; // First row is headers
+
+      // Add all rows
+      for (const row of rows) {
+        const rowData = headers.map(header => {
+          const value = row.get(header);
+          return value !== undefined ? value : '';
+        });
+        data.push(rowData);
+      }
+
+      // Create worksheet from data
+      const ws = XLSX.utils.aoa_to_sheet(data);
+
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(workbook, ws, dateStr);
+
+      // Create temporary file path
+      const tempDir = os.tmpdir();
+      const fileName = `attendance_${dateStr}.xlsx`;
+      const filePath = path.join(tempDir, fileName);
+
+      // Write Excel file
+      XLSX.writeFile(workbook, filePath);
+      logger.info(`Created Excel file: ${filePath}`);
+
+      // Calculate statistics for caption
       let presentCount = 0;
       let lateCount = 0;
       let absentCount = 0;
-      let leftEarlyCount = 0;
       let totalHoursWorked = 0;
 
-      const employeeStats = [];
-
       for (const row of rows) {
-        const name = row.get('Name') || '';
         const whenCome = row.get('When come') || '';
-        const leaveTime = row.get('Leave time') || '';
-        const cameOnTime = row.get('Came on time') || '';
         const absent = row.get('Absent') || '';
-        const leftEarly = row.get('Left early') || '';
+        const cameOnTime = row.get('Came on time') || '';
         const hoursWorked = parseFloat(row.get('Hours worked') || '0');
 
         if (whenCome.trim()) {
           presentCount++;
           totalHoursWorked += hoursWorked;
-
-          let status = '✅';
           if (cameOnTime.toLowerCase() === 'false' || cameOnTime.toLowerCase() === 'no') {
-            status = '⚠️';
             lateCount++;
           }
-          if (leftEarly.toLowerCase() === 'yes') {
-            status = '🟡';
-            leftEarlyCount++;
-          }
-
-          employeeStats.push({
-            name,
-            status,
-            arrival: whenCome,
-            departure: leaveTime || '-',
-            hours: hoursWorked.toFixed(1)
-          });
         } else if (absent.toLowerCase() === 'yes') {
           absentCount++;
-          employeeStats.push({
-            name,
-            status: '❌',
-            arrival: 'Отсутствует',
-            departure: '-',
-            hours: '0'
-          });
         }
       }
 
-      // Format report
       const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY (dddd)');
-      let report = `📊 <b>ОТЧЁТ ЗА ${formattedDate.toUpperCase()}</b>\n\n`;
+      const caption =
+        `📊 <b>ОТЧЁТ ЗА ${formattedDate.toUpperCase()}</b>\n\n` +
+        `✅ Присутствовали: ${presentCount}\n` +
+        `⚠️ Опоздали: ${lateCount}\n` +
+        `❌ Отсутствовали: ${absentCount}\n` +
+        `⏱ Всего часов: ${totalHoursWorked.toFixed(1)}\n\n` +
+        `📄 Полный отчёт во вложении\n` +
+        `🤖 Данные архивированы автоматически`;
 
-      report += `<b>📈 Статистика:</b>\n`;
-      report += `✅ Присутствовали: ${presentCount}\n`;
-      report += `⚠️ Опоздали: ${lateCount}\n`;
-      report += `❌ Отсутствовали: ${absentCount}\n`;
-      report += `🟡 Ушли раньше: ${leftEarlyCount}\n`;
-      report += `⏱ Всего часов: ${totalHoursWorked.toFixed(1)}\n\n`;
-
-      report += `<b>👥 Детали по сотрудникам:</b>\n`;
-      report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-
-      for (const emp of employeeStats) {
-        report += `${emp.status} <b>${emp.name}</b>\n`;
-        report += `   Приход: ${emp.arrival} | Уход: ${emp.departure}\n`;
-        report += `   Часов: ${emp.hours}\n\n`;
-      }
-
-      report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-      report += `📅 Данные за ${dateStr} архивированы\n`;
-      report += `🤖 Отчёт создан автоматически`;
-
-      // Send to group
-      await this.bot.telegram.sendMessage(
+      // Send the Excel file to the group
+      await this.bot.telegram.sendDocument(
         Config.DAILY_REPORT_GROUP_ID,
-        report,
-        { parse_mode: 'HTML' }
+        { source: filePath, filename: fileName },
+        {
+          caption: caption,
+          parse_mode: 'HTML'
+        }
       );
 
-      logger.info(`Daily report sent to group ${Config.DAILY_REPORT_GROUP_ID}`);
+      // Clean up temporary file
+      fs.unlink(filePath, (err) => {
+        if (err) {
+          logger.warn(`Failed to delete temp file ${filePath}: ${err.message}`);
+        } else {
+          logger.info(`Cleaned up temp file: ${filePath}`);
+        }
+      });
+
+      logger.info(`Daily report (Excel file) sent to group ${Config.DAILY_REPORT_GROUP_ID}`);
     } catch (error) {
       logger.error(`Error sending daily report to group: ${error.message}`);
+      logger.error(error.stack);
     }
   }
 

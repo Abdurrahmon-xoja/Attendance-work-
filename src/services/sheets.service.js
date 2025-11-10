@@ -13,6 +13,77 @@ class SheetsService {
   constructor() {
     this.doc = null;
     this.isConnected = false;
+    // Cache for daily sheets to reduce API calls
+    this._dailySheetCache = new Map(); // key: sheetName, value: { worksheet, rows, lastUpdated }
+    this._rosterCache = null; // Cache roster data
+    this._cacheTimeout = 120000; // 120 seconds cache validity (increased for concurrent operations)
+    this._pendingInvalidations = new Map(); // Delayed cache invalidation
+    this._activeOperations = new Map(); // Track active operations to prevent cache invalidation
+    this._initializationLocks = new Map(); // Prevent concurrent sheet initialization
+  }
+
+  /**
+   * Track start of an operation on a sheet
+   * @param {string} sheetName - Sheet name
+   */
+  _startOperation(sheetName) {
+    const current = this._activeOperations.get(sheetName) || 0;
+    this._activeOperations.set(sheetName, current + 1);
+    logger.debug(`Started operation on ${sheetName} (${current + 1} active)`);
+  }
+
+  /**
+   * Track end of an operation on a sheet
+   * @param {string} sheetName - Sheet name
+   */
+  _endOperation(sheetName) {
+    const current = this._activeOperations.get(sheetName) || 0;
+    const newCount = Math.max(0, current - 1);
+    this._activeOperations.set(sheetName, newCount);
+    logger.debug(`Ended operation on ${sheetName} (${newCount} active)`);
+
+    // Trigger delayed cache invalidation if no operations left
+    if (newCount === 0) {
+      this._invalidateCache(sheetName);
+    }
+  }
+
+  /**
+   * Retry operation with exponential backoff for quota errors
+   * @param {Function} operation - Async operation to retry
+   * @param {number} maxRetries - Maximum number of retries
+   * @param {number} initialDelay - Initial delay in ms
+   * @returns {Promise} Result of operation
+   */
+  async _retryOperation(operation, maxRetries = 3, initialDelay = 1000) {
+    let lastError;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+
+        // Check if it's a quota error (429)
+        const isQuotaError = error.message && (
+          error.message.includes('429') ||
+          error.message.includes('Quota exceeded') ||
+          error.message.includes('quota metric')
+        );
+
+        // Only retry on quota errors
+        if (!isQuotaError || attempt === maxRetries) {
+          throw error;
+        }
+
+        // Exponential backoff: 1s, 2s, 4s
+        const delay = initialDelay * Math.pow(2, attempt);
+        logger.warn(`Quota error detected, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError;
   }
 
   /**
@@ -36,6 +107,117 @@ class SheetsService {
       logger.error(`Failed to connect to Google Sheets: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Invalidate cache for a specific sheet or all sheets (with delay to batch multiple writes)
+   * @param {string} sheetName - Optional sheet name to invalidate (or all if not provided)
+   */
+  _invalidateCache(sheetName = null) {
+    if (sheetName) {
+      // Don't invalidate if there are active operations on this sheet
+      const activeOps = this._activeOperations.get(sheetName) || 0;
+      if (activeOps > 0) {
+        logger.debug(`Skipping cache invalidation for ${sheetName} - ${activeOps} active operations`);
+        return;
+      }
+
+      // Cancel any pending invalidation
+      if (this._pendingInvalidations.has(sheetName)) {
+        clearTimeout(this._pendingInvalidations.get(sheetName));
+      }
+
+      // Schedule delayed invalidation (10 seconds - increased for concurrent operations)
+      // This allows multiple writes during check-in to complete without repeated cache hits
+      const timeoutId = setTimeout(() => {
+        // Double-check no active operations before invalidating
+        const stillActiveOps = this._activeOperations.get(sheetName) || 0;
+        if (stillActiveOps === 0) {
+          this._dailySheetCache.delete(sheetName);
+          this._pendingInvalidations.delete(sheetName);
+          logger.debug(`Cache invalidated for sheet: ${sheetName} (delayed)`);
+        } else {
+          logger.debug(`Cache invalidation cancelled for ${sheetName} - operations still active`);
+        }
+      }, 10000);
+
+      this._pendingInvalidations.set(sheetName, timeoutId);
+    } else {
+      // Immediate full invalidation
+      this._dailySheetCache.clear();
+      this._rosterCache = null;
+      logger.debug('All cache invalidated');
+    }
+  }
+
+  /**
+   * Check if cached data is still valid
+   * @param {number} lastUpdated - Timestamp when data was cached
+   * @returns {boolean} True if cache is still valid
+   */
+  _isCacheValid(lastUpdated) {
+    return (Date.now() - lastUpdated) < this._cacheTimeout;
+  }
+
+  /**
+   * Get cached daily sheet rows or fetch from API if not cached
+   * @param {string} sheetName - Sheet name
+   * @returns {Object} { worksheet, rows }
+   */
+  async _getCachedDailySheet(sheetName) {
+    const cached = this._dailySheetCache.get(sheetName);
+
+    if (cached && this._isCacheValid(cached.lastUpdated)) {
+      logger.debug(`Using cached data for sheet: ${sheetName}`);
+      return { worksheet: cached.worksheet, rows: cached.rows };
+    }
+
+    // Cache miss or expired - fetch from API with retry logic
+    logger.debug(`Fetching fresh data for sheet: ${sheetName}`);
+
+    const worksheet = await this._retryOperation(async () => {
+      const ws = await this.getWorksheet(sheetName);
+      await ws.loadHeaderRow();
+      return ws;
+    });
+
+    const rows = await this._retryOperation(async () => {
+      return await worksheet.getRows();
+    });
+
+    // Update cache
+    this._dailySheetCache.set(sheetName, {
+      worksheet,
+      rows,
+      lastUpdated: Date.now()
+    });
+
+    return { worksheet, rows };
+  }
+
+  /**
+   * Get cached roster data or fetch from API if not cached
+   * @returns {Array} Roster rows
+   */
+  async _getCachedRoster() {
+    if (this._rosterCache && this._isCacheValid(this._rosterCache.lastUpdated)) {
+      logger.debug('Using cached roster data');
+      return this._rosterCache.rows;
+    }
+
+    // Cache miss or expired - fetch from API
+    logger.debug('Fetching fresh roster data');
+    const roster = await this.getWorksheet(Config.SHEET_ROSTER);
+    await roster.loadHeaderRow();
+    const rows = await roster.getRows();
+
+    // Update cache
+    this._rosterCache = {
+      rows,
+      lastUpdated: Date.now()
+    };
+
+    return rows;
   }
 
   /**
@@ -68,12 +250,8 @@ class SheetsService {
    */
   async findEmployeeByTelegramId(telegramId) {
     try {
-      const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-      await roster.loadHeaderRow();
-      const rows = await roster.getRows();
-
-      console.log("-------- Rows from Roster Sheet -------");
-      console.log(rows);
+      // Use cached roster data to reduce API calls
+      const rows = await this._getCachedRoster();
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -247,10 +425,24 @@ class SheetsService {
     try {
       const sheetName = dateStr; // e.g., "2025-10-29"
 
-      // Check if sheet already exists and has data
-      // Force refresh to get current sheet state from Google API (prevent stale cache)
-      await this.doc.loadInfo();
-      let worksheet = await this.getWorksheet(sheetName);
+      // Check if there's already an initialization in progress for this sheet
+      if (this._initializationLocks.has(sheetName)) {
+        logger.debug(`Sheet ${sheetName} initialization already in progress, waiting...`);
+        // Wait for existing initialization to complete
+        await this._initializationLocks.get(sheetName);
+        return true;
+      }
+
+      // Create a lock promise for this initialization
+      let releaseLock;
+      const lockPromise = new Promise(resolve => { releaseLock = resolve; });
+      this._initializationLocks.set(sheetName, lockPromise);
+
+      try {
+        // Check if sheet already exists and has data
+        // Use cache to avoid redundant API calls
+        const existingSheet = this.doc.sheetsByTitle[sheetName];
+        let worksheet = existingSheet || await this._retryOperation(() => this.getWorksheet(sheetName));
 
       // Multi-level check for existing data to prevent accidental re-initialization
       let hasHeaders = false;
@@ -315,8 +507,8 @@ class SheetsService {
 
       // If headers don't exist, initialize the sheet
       if (!hasHeaders) {
-        // Resize sheet to fit all columns (we have 29 columns)
-        await worksheet.resize({ rowCount: 1000, columnCount: 35 });
+        // Resize sheet to fit all columns (we now have 38 columns with departure tracking)
+        await worksheet.resize({ rowCount: 1000, columnCount: 44 });
 
         // Set headers
         await worksheet.setHeaderRow([
@@ -326,6 +518,10 @@ class SheetsService {
           'When come',
           'Leave time',
           'Hours worked',
+          'Departure Location',
+          'Departure Location Accuracy',
+          'Departure Verification Status',
+          'Departure Anomalies',
           'Remaining hours to work',
           'Left early',
           'Why left early',
@@ -348,7 +544,12 @@ class SheetsService {
           'Currently out',
           'Penalty minutes',
           'Required end time',
-          'Point'
+          'Point',
+          'Office Responsible',
+          'Arrival Location',
+          'Arrival Location Accuracy',
+          'Arrival Anomalies',
+          'Arrival Verification Status'
         ]);
         await worksheet.loadHeaderRow();
 
@@ -367,6 +568,10 @@ class SheetsService {
               'When come': '',
               'Leave time': '',
               'Hours worked': '',
+              'Departure Location': '',
+              'Departure Location Accuracy': '',
+              'Departure Verification Status': '',
+              'Departure Anomalies': '',
               'Remaining hours to work': '',
               'Left early': '',
               'Why left early': '',
@@ -389,7 +594,11 @@ class SheetsService {
               'Currently out': 'false',
               'Penalty minutes': '',
               'Required end time': '',
-              'Point': ''
+              'Point': '',
+              'Location': '',
+              'Location Accuracy': '',
+              'Anomalies Detected': '',
+              'Verification Status': ''
             });
           }
         }
@@ -473,7 +682,11 @@ class SheetsService {
               'Currently out': 'false',
               'Penalty minutes': '',
               'Required end time': '',
-              'Point': ''
+              'Point': '',
+              'Location': '',
+              'Location Accuracy': '',
+              'Anomalies Detected': '',
+              'Verification Status': ''
             });
 
             newEmployeesAdded++;
@@ -487,9 +700,16 @@ class SheetsService {
         }
       }
 
-      return true;
+        return true;
+      } finally {
+        // Release the lock
+        this._initializationLocks.delete(sheetName);
+        releaseLock();
+      }
     } catch (error) {
       logger.error(`Error initializing daily sheet: ${error.message}`);
+      // Release the lock on error too
+      this._initializationLocks.delete(sheetName);
       return false;
     }
   }
@@ -504,7 +724,13 @@ class SheetsService {
    * @returns {boolean} True if successful, false otherwise
    */
   async logEvent(telegramId, name, eventType, details = '', ratingImpact = 0.0) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD'); // e.g., "2025-10-29"
+
     try {
+      // Track this operation
+      this._startOperation(sheetName);
+
       // Duplicate event prevention: Use in-memory cache to prevent duplicate events within 5 seconds
       if (!this._recentEvents) {
         this._recentEvents = new Map();
@@ -526,24 +752,11 @@ class SheetsService {
         this._recentEvents.delete(firstKey);
       }
 
-      const now = moment.tz(Config.TIMEZONE);
-      const sheetName = now.format('YYYY-MM-DD'); // e.g., "2025-10-29"
-
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      // Get the daily sheet
-      let worksheet = await this.getWorksheet(sheetName);
-
-      // Load headers (should exist now after initialization)
-      try {
-        await worksheet.loadHeaderRow();
-      } catch (err) {
-        logger.error(`Failed to load headers for ${sheetName}: ${err.message}`);
-        return false;
-      }
-
-      const rows = await worksheet.getRows();
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
 
       // Find the employee's row
       let employeeRow = null;
@@ -913,9 +1126,75 @@ class SheetsService {
       }
 
       logger.info(`Logged event: ${eventType} for ${name}`);
+
       return true;
     } catch (error) {
       logger.error(`Error logging event: ${error.message}`);
+      return false;
+    } finally {
+      // Track operation end (will trigger delayed cache invalidation)
+      this._endOperation(sheetName);
+    }
+  }
+
+  /**
+   * Cancel fraudulent arrival (remove check-in if location fraud detected)
+   * @param {number} telegramId - User's Telegram ID
+   * @param {string} name - User's full name
+   * @param {Array} anomalies - List of anomalies detected
+   * @returns {boolean} True if successful
+   */
+  async cancelFraudulentArrival(telegramId, name, anomalies = []) {
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const sheetName = now.format('YYYY-MM-DD');
+
+      await this.initializeDailySheet(sheetName);
+      const worksheet = await this.getWorksheet(sheetName);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      // Find employee row
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (!employeeRow) {
+        logger.warn(`Employee with telegram_id ${telegramId} not found for fraud rollback`);
+        return false;
+      }
+
+      // Clear arrival data
+      employeeRow.set('When come', '');
+      employeeRow.set('Came on time', '');
+      employeeRow.set('Penalty minutes', '');
+      employeeRow.set('Required end time', '');
+
+      // Mark as absent with fraud attempt note
+      employeeRow.set('Absent', 'Yes');
+      const anomalyList = anomalies.map(a => a.type).join(', ');
+      employeeRow.set('Why absent', `FRAUD ATTEMPT: ${anomalyList}`);
+
+      // Set severe penalty for fraud attempt
+      employeeRow.set('Point', '-2.0');
+
+      // Clear location tracking data
+      employeeRow.set('Verification Status', 'FRAUD_DETECTED');
+
+      await employeeRow.save();
+
+      logger.warn(`🚨 FRAUD: Cancelled arrival for ${name} (${telegramId}) - Anomalies: ${anomalyList}`);
+
+      // Invalidate cache
+      this._invalidateCache(sheetName);
+
+      return true;
+    } catch (error) {
+      logger.error(`Error cancelling fraudulent arrival: ${error.message}`);
       return false;
     }
   }
@@ -930,16 +1209,17 @@ class SheetsService {
    * @param {string} expectedReturn - Expected return time (HH:mm:ss)
    */
   async logTempExit(telegramId, name, reason, durationMinutes, exitTime, expectedReturn) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
+
     try {
-      const now = moment.tz(Config.TIMEZONE);
-      const sheetName = now.format('YYYY-MM-DD');
+      this._startOperation(sheetName);
 
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      const worksheet = await this.getWorksheet(sheetName);
-      await worksheet.loadHeaderRow();
-      const rows = await worksheet.getRows();
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
 
       // Find the employee's row
       let employeeRow = null;
@@ -989,6 +1269,8 @@ class SheetsService {
     } catch (error) {
       logger.error(`Error logging temporary exit: ${error.message}`);
       throw error;
+    } finally {
+      this._endOperation(sheetName);
     }
   }
 
@@ -999,16 +1281,17 @@ class SheetsService {
    * @param {string} returnTime - Return time (HH:mm:ss)
    */
   async logTempReturn(telegramId, name, returnTime) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
+
     try {
-      const now = moment.tz(Config.TIMEZONE);
-      const sheetName = now.format('YYYY-MM-DD');
+      this._startOperation(sheetName);
 
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      const worksheet = await this.getWorksheet(sheetName);
-      await worksheet.loadHeaderRow();
-      const rows = await worksheet.getRows();
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
 
       // Find the employee's row
       let employeeRow = null;
@@ -1069,6 +1352,8 @@ class SheetsService {
     } catch (error) {
       logger.error(`Error logging temporary return: ${error.message}`);
       throw error;
+    } finally {
+      this._endOperation(sheetName);
     }
   }
 
@@ -1078,36 +1363,15 @@ class SheetsService {
    * @returns {Object} Status information
    */
   async getUserStatusToday(telegramId) {
-    try {
-      const now = moment.tz(Config.TIMEZONE);
-      const sheetName = now.format('YYYY-MM-DD');
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
 
+    try {
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      const worksheet = await this.getWorksheet(sheetName);
-
-      // Load headers (should exist now after initialization)
-      try {
-        await worksheet.loadHeaderRow();
-      } catch (err) {
-        logger.error(`Failed to load headers for ${sheetName}: ${err.message}`);
-        return {
-          hasArrived: false,
-          arrivalTime: null,
-          hasDeparted: false,
-          departureTime: null,
-          departureMessage: '',
-          violations: [],
-          lateNotified: false,
-          extendNotified: false,
-          isAbsent: false,
-          todayPoint: 0,
-          currentlyOut: false
-        };
-      }
-
-      const rows = await worksheet.getRows();
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
 
       // Find the employee's row
       let employeeRow = null;
@@ -1334,6 +1598,73 @@ class SheetsService {
         totalSurplusMinutes: 0,
         netBalanceMinutes: 0
       };
+    }
+  }
+
+  /**
+   * Get comprehensive monthly statistics from monthly report
+   * @param {string} telegramId - Employee's Telegram ID
+   * @returns {Object} Monthly statistics
+   */
+  async getMonthlyStats(telegramId) {
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const yearMonth = now.format('YYYY-MM');
+      const sheetName = `Report_${yearMonth}`;
+
+      // Get monthly report sheet
+      const worksheet = this.doc.sheetsByTitle[sheetName];
+      if (!worksheet) {
+        logger.warn(`Monthly report sheet not found: ${sheetName}`);
+        return null;
+      }
+
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      // Find employee's row
+      for (const row of rows) {
+        if (row.get('Telegram ID')?.toString().trim() === telegramId.toString()) {
+          // Extract all monthly statistics
+          return {
+            name: row.get('Name') || '',
+            company: row.get('Company') || '',
+            workSchedule: row.get('Work Schedule') || '',
+            totalWorkDays: parseInt(row.get('Total Work Days') || '0'),
+            daysWorked: parseInt(row.get('Days Worked') || '0'),
+            daysAbsent: parseInt(row.get('Days Absent') || '0'),
+            daysAbsentNotified: parseInt(row.get('Days Absent (Notified)') || '0'),
+            daysAbsentSilent: parseInt(row.get('Days Absent (Silent)') || '0'),
+            onTimeArrivals: parseInt(row.get('On Time Arrivals') || '0'),
+            lateArrivalsNotified: parseInt(row.get('Late Arrivals (Notified)') || '0'),
+            lateArrivalsSilent: parseInt(row.get('Late Arrivals (Silent)') || '0'),
+            earlyDepartures: parseInt(row.get('Early Departures') || '0'),
+            totalHoursRequired: parseFloat(row.get('Total Hours Required') || '0'),
+            totalHoursWorked: parseFloat(row.get('Total Hours Worked') || '0'),
+            hoursDeficitSurplus: parseFloat(row.get('Hours Deficit/Surplus') || '0'),
+            totalPenaltyMinutes: parseInt(row.get('Total Penalty Minutes') || '0'),
+            totalDeficitMinutes: parseInt(row.get('Total Deficit Minutes') || '0'),
+            totalSurplusMinutes: parseInt(row.get('Total Surplus Minutes') || '0'),
+            netBalanceMinutes: parseInt(row.get('Net Balance Minutes') || '0'),
+            netBalanceHours: row.get('Net Balance (Hours)') || '+0:00',
+            balanceStatus: row.get('Balance Status') || '⚪ Balanced',
+            totalPoints: parseFloat(row.get('Total Points') || '0'),
+            averageDailyPoints: parseFloat(row.get('Average Daily Points') || '0'),
+            rating: parseFloat(row.get('Rating (0-10)') || '0'),
+            ratingZone: row.get('Rating Zone') || '',
+            attendanceRate: parseFloat(row.get('Attendance Rate %') || '0'),
+            onTimeRate: parseFloat(row.get('On-Time Rate %') || '0'),
+            lastUpdated: row.get('Last Updated') || ''
+          };
+        }
+      }
+
+      // Employee not found in monthly report
+      logger.warn(`Employee ${telegramId} not found in monthly report ${sheetName}`);
+      return null;
+    } catch (error) {
+      logger.error(`Error getting monthly stats: ${error.message}`);
+      return null;
     }
   }
 
@@ -1691,6 +2022,301 @@ class SheetsService {
     } catch (error) {
       logger.error(`Error updating monthly report: ${error.message}`);
       return false;
+    }
+  }
+
+  /**
+   * Update location data for employee's arrival
+   * @param {number} telegramId - User's Telegram ID
+   * @param {Object} location - Location { latitude, longitude }
+   * @param {number} accuracy - GPS accuracy in meters
+   * @returns {boolean} True if successful
+   */
+  async updateArrivalLocation(telegramId, location, accuracy = null) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
+
+    try {
+      this._startOperation(sheetName);
+
+      await this.initializeDailySheet(sheetName);
+
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
+
+      // Find employee row
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (!employeeRow) {
+        logger.warn(`Employee with telegram_id ${telegramId} not found for location update`);
+        return false;
+      }
+
+      // Store location as "lat,lng"
+      const locationStr = `${location.latitude.toFixed(6)},${location.longitude.toFixed(6)}`;
+      employeeRow.set('Arrival Location', locationStr);
+
+      if (accuracy !== null) {
+        employeeRow.set('Arrival Location Accuracy', `${accuracy.toFixed(1)}m`);
+      } else {
+        employeeRow.set('Arrival Location Accuracy', 'unknown');
+      }
+
+      // Set initial verification status as "TRACKING"
+      employeeRow.set('Arrival Verification Status', 'TRACKING');
+
+      await employeeRow.save();
+
+      logger.info(`Location data updated for telegram_id ${telegramId}: ${locationStr}`);
+
+      return true;
+    } catch (error) {
+      logger.error(`Error updating arrival location: ${error.message}`);
+      return false;
+    } finally {
+      this._endOperation(sheetName);
+    }
+  }
+
+  /**
+   * Update location verification status after tracking completes
+   * @param {number} telegramId - User's Telegram ID
+   * @param {string} status - Verification status (OK, FLAGGED)
+   * @param {Array} anomalies - List of anomaly objects
+   * @returns {boolean} True if successful
+   */
+  async updateLocationVerification(telegramId, status, anomalies = []) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
+
+    try {
+      this._startOperation(sheetName);
+
+      await this.initializeDailySheet(sheetName);
+
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
+
+      // Find employee row
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (!employeeRow) {
+        logger.warn(`Employee with telegram_id ${telegramId} not found for verification update`);
+        return false;
+      }
+
+      // Update verification status
+      employeeRow.set('Arrival Verification Status', status);
+
+      // Store anomalies as comma-separated list
+      if (anomalies.length > 0) {
+        const anomalyTypes = anomalies.map(a => a.type).join(', ');
+        employeeRow.set('Arrival Anomalies', anomalyTypes);
+      } else {
+        employeeRow.set('Arrival Anomalies', '');
+      }
+
+      await employeeRow.save();
+
+      logger.info(`Location verification updated for telegram_id ${telegramId}: ${status}`);
+      if (anomalies.length > 0) {
+        logger.warn(`  Anomalies: ${anomalies.map(a => a.type).join(', ')}`);
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(`Error updating location verification: ${error.message}`);
+      return false;
+    } finally {
+      this._endOperation(sheetName);
+    }
+  }
+
+  /**
+   * Update departure location when user checks out
+   * @param {number} telegramId - User's Telegram ID
+   * @param {Object} location - Location { latitude, longitude }
+   * @param {number} accuracy - GPS accuracy in meters
+   * @returns {boolean} True if successful
+   */
+  async updateDepartureLocation(telegramId, location, accuracy = null) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
+
+    try {
+      this._startOperation(sheetName);
+
+      await this.initializeDailySheet(sheetName);
+
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
+
+      // Find employee row
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (!employeeRow) {
+        logger.warn(`Employee with telegram_id ${telegramId} not found in daily sheet`);
+        return false;
+      }
+
+      // Format location as "lat,lng"
+      const locationStr = `${location.latitude.toFixed(6)},${location.longitude.toFixed(6)}`;
+      const accuracyStr = accuracy !== null ? `${Math.round(accuracy)}m` : 'unknown';
+
+      // Update departure location columns
+      employeeRow.set('Departure Location', locationStr);
+      employeeRow.set('Departure Location Accuracy', accuracyStr);
+      employeeRow.set('Departure Verification Status', 'TRACKING');
+
+      await employeeRow.save();
+
+      logger.info(`Departure location data updated for telegram_id ${telegramId}: ${locationStr}`);
+
+      return true;
+    } catch (error) {
+      logger.error(`Error updating departure location: ${error.message}`);
+      return false;
+    } finally {
+      this._endOperation(sheetName);
+    }
+  }
+
+  /**
+   * Update departure location verification status after tracking completes
+   * @param {number} telegramId - User's Telegram ID
+   * @param {string} status - Verification status (OK, FLAGGED)
+   * @param {Array} anomalies - List of anomaly objects
+   * @returns {boolean} True if successful
+   */
+  async updateDepartureVerification(telegramId, status, anomalies = []) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
+
+    try {
+      this._startOperation(sheetName);
+
+      await this.initializeDailySheet(sheetName);
+
+      // Use cached data to reduce API calls
+      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
+
+      // Find employee row
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (!employeeRow) {
+        logger.warn(`Employee with telegram_id ${telegramId} not found for departure verification`);
+        return false;
+      }
+
+      // Update verification status
+      employeeRow.set('Departure Verification Status', status);
+
+      // Format anomalies for display
+      if (anomalies.length > 0) {
+        const anomalyTypes = anomalies.map(a => a.type).join(', ');
+        employeeRow.set('Departure Anomalies', anomalyTypes);
+      } else {
+        employeeRow.set('Departure Anomalies', 'None');
+      }
+
+      await employeeRow.save();
+
+      logger.info(`Departure verification updated for telegram_id ${telegramId}: ${status}`);
+      if (anomalies.length > 0) {
+        logger.warn(`  Departure Anomalies: ${anomalies.map(a => a.type).join(', ')}`);
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(`Error updating departure verification: ${error.message}`);
+      return false;
+    } finally {
+      this._endOperation(sheetName);
+    }
+  }
+
+  /**
+   * Get location verification status for a user today
+   * @param {number} telegramId - User's Telegram ID
+   * @returns {Object} Verification data
+   */
+  async getLocationVerification(telegramId) {
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const sheetName = now.format('YYYY-MM-DD');
+
+      await this.initializeDailySheet(sheetName);
+      const worksheet = await this.getWorksheet(sheetName);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      // Find employee row
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
+          const locationStr = row.get('Location') || '';
+          const accuracyStr = row.get('Location Accuracy') || '';
+          const anomaliesStr = row.get('Anomalies Detected') || '';
+          const status = row.get('Verification Status') || '';
+
+          // Parse location
+          let location = null;
+          if (locationStr.trim()) {
+            const [lat, lng] = locationStr.split(',').map(s => parseFloat(s.trim()));
+            if (!isNaN(lat) && !isNaN(lng)) {
+              location = { latitude: lat, longitude: lng };
+            }
+          }
+
+          return {
+            hasLocation: location !== null,
+            location: location,
+            accuracy: accuracyStr ? parseFloat(accuracyStr) : null,
+            anomalies: anomaliesStr ? anomaliesStr.split(',').map(s => s.trim()) : [],
+            status: status
+          };
+        }
+      }
+
+      return {
+        hasLocation: false,
+        location: null,
+        accuracy: null,
+        anomalies: [],
+        status: ''
+      };
+    } catch (error) {
+      logger.error(`Error getting location verification: ${error.message}`);
+      return {
+        hasLocation: false,
+        location: null,
+        accuracy: null,
+        anomalies: [],
+        status: ''
+      };
     }
   }
 }

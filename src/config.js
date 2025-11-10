@@ -42,6 +42,18 @@ class Config {
   static GREEN_ZONE_MIN = parseFloat(process.env.GREEN_ZONE_MIN || '8.5');
   static YELLOW_ZONE_MIN = parseFloat(process.env.YELLOW_ZONE_MIN || '6.5');
 
+  // Location Tracking Configuration
+  static TRACKING_DURATION_MINUTES = parseFloat(process.env.TRACKING_DURATION_MINUTES || '5');
+  static MIN_UPDATES_FOR_VERIFICATION = parseInt(process.env.MIN_UPDATES_FOR_VERIFICATION || '3');
+  static OFFICE_LATITUDE = parseFloat(process.env.OFFICE_LATITUDE || '41.302799');
+  static OFFICE_LONGITUDE = parseFloat(process.env.OFFICE_LONGITUDE || '69.314780');
+  static GEOFENCE_RADIUS_METERS = parseInt(process.env.GEOFENCE_RADIUS_METERS || '200');
+  static MAX_ACCURACY_METERS = parseInt(process.env.MAX_ACCURACY_METERS || '50');
+  static MAX_JUMP_DISTANCE_METERS = parseInt(process.env.MAX_JUMP_DISTANCE_METERS || '500');
+  static MAX_SPEED_KMH = parseInt(process.env.MAX_SPEED_KMH || '100');
+  static UPDATE_TIMEOUT_SECONDS = parseInt(process.env.UPDATE_TIMEOUT_SECONDS || '60');
+  static ENABLE_LOCATION_TRACKING = process.env.ENABLE_LOCATION_TRACKING === 'true';
+
   // Feature Flags
   static REQUIRE_DEPARTURE_MESSAGE = process.env.REQUIRE_DEPARTURE_MESSAGE !== 'false';
   static ENABLE_DUTY_SYSTEM = process.env.ENABLE_DUTY_SYSTEM !== 'false';

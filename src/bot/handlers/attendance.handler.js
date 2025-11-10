@@ -7,9 +7,19 @@ const moment = require('moment-timezone');
 const { Markup } = require('telegraf');
 const sheetsService = require('../../services/sheets.service');
 const CalculatorService = require('../../services/calculator.service');
+const locationTrackerService = require('../../services/locationTracker.service');
+const anomalyDetectorService = require('../../services/anomalyDetector.service');
 const Keyboards = require('../keyboards/buttons');
 const Config = require('../../config');
 const logger = require('../../utils/logger');
+
+// Temporary state: users awaiting location for check-in
+// Map<userId, { requestTime, user, checkInData }>
+const awaitingLocationForCheckIn = new Map();
+
+// Temporary state: users awaiting location for checkout/departure
+// Map<userId, { requestTime, user, checkoutTime, departureType, workTimeData }>
+const awaitingLocationForCheckout = new Map();
 
 /**
  * Get user data or prompt for registration
@@ -20,8 +30,8 @@ async function getUserOrPromptRegistration(ctx) {
 
   if (!user) {
     await ctx.reply(
-      '❌ Вы не зарегистрированы в системе.\n' +
-      'Используйте /start для регистрации.'
+      '❌ К сожалению, Вы не зарегистрированы в системе.\n' +
+      'Пожалуйста, используйте команду /start для регистрации.'
     );
     return null;
   }
@@ -43,6 +53,152 @@ async function getMainMenuKeyboard(userId) {
 }
 
 /**
+ * Process arrival check-in with location
+ * @param {Object} ctx - Telegraf context
+ * @param {Object} user - User object
+ * @param {Object} location - Location object
+ * @returns {Promise<void>}
+ */
+async function processArrivalWithLocation(ctx, user, location) {
+  try {
+    const now = moment.tz(Config.TIMEZONE);
+
+    // Start tracking session
+    const trackingResult = locationTrackerService.startTracking(
+      user.telegramId,
+      {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: location.horizontal_accuracy || location.accuracy || null
+      },
+      user.nameFull
+    );
+
+    if (!trackingResult.success) {
+      logger.error(`Failed to start tracking for ${user.nameFull}: ${trackingResult.error}`);
+      // Continue with check-in anyway
+    }
+
+    // Check for initial location anomaly
+    if (trackingResult.hasInitialAnomaly) {
+      const anomaly = trackingResult.initialAnomaly;
+      logger.warn(`Initial location anomaly for ${user.nameFull}: ${anomaly.type}`);
+
+      // If CRITICAL (wrong location), reject check-in
+      if (anomaly.severity === 'CRITICAL') {
+        await ctx.reply(
+          `❌ К сожалению, отметка прихода не выполнена: ${anomaly.description}\n\n` +
+          `Пожалуйста, убедитесь, что Вы находитесь в офисе перед отметкой прихода.`,
+          Keyboards.getMainMenu(ctx.from.id)
+        );
+        // Stop tracking
+        locationTrackerService.forceStopTracking(user.telegramId);
+        return;
+      }
+    }
+
+    // Parse work schedule
+    const workTime = CalculatorService.parseWorkTime(user.workTime);
+    if (!workTime) {
+      await ctx.reply(
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
+        Keyboards.getMainMenu(ctx.from.id)
+      );
+      return;
+    }
+
+    // Check if arrived today
+    const status = await sheetsService.getUserStatusToday(user.telegramId);
+
+    // Calculate lateness
+    const { latenessMinutes, status: latenessStatus } = CalculatorService.calculateLateness(
+      workTime.start,
+      now
+    );
+
+    let responseText = `✅ **Приход отмечен! Добро пожаловать на работу.**\n\n`;
+    let eventType = 'ARRIVAL';
+    let details = 'on_time';
+    let ratingImpact = 0.0;
+
+    if (latenessStatus === 'ON_TIME') {
+      responseText += `🎉 Вы пришли вовремя!`;
+      details = 'on_time';
+    } else if (latenessStatus === 'LATE' || latenessStatus === 'SOFT_LATE') {
+      if (status.lateNotified) {
+        responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (Вы предупредили)\n`;
+        details = `late_notified, ${latenessMinutes}min`;
+        ratingImpact = CalculatorService.calculateRatingImpact('LATE_NOTIFIED');
+      } else {
+        responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (без предупреждения)\n`;
+        details = `late_silent, ${latenessMinutes}min`;
+        ratingImpact = CalculatorService.calculateRatingImpact('LATE_SILENT');
+      }
+
+      const penaltyMinutes = CalculatorService.calculatePenaltyTime(latenessMinutes);
+      const requiredEnd = CalculatorService.calculateRequiredEndTime(workTime.end, penaltyMinutes);
+      responseText += `⏳ Необходимо отработать дополнительно: ${CalculatorService.formatTimeDiff(penaltyMinutes)}\n`;
+      responseText += `⏰ Уход не раньше: ${requiredEnd.format('HH:mm')}`;
+
+      if (!status.lateNotified) {
+        await sheetsService.logEvent(
+          user.telegramId,
+          user.nameFull,
+          'LATE_SILENT',
+          `${latenessMinutes} min, penalty=${penaltyMinutes} min`,
+          ratingImpact
+        );
+        ratingImpact = 0.0;
+      }
+    }
+
+    // Log arrival event
+    await sheetsService.logEvent(
+      user.telegramId,
+      user.nameFull,
+      eventType,
+      details,
+      ratingImpact
+    );
+
+    // Store location data
+    await sheetsService.updateArrivalLocation(
+      user.telegramId,
+      { latitude: location.latitude, longitude: location.longitude },
+      location.horizontal_accuracy || location.accuracy || null
+    );
+
+    // Get today's points
+    const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
+    const todayPoint = updatedStatus.todayPoint || 0;
+    let pointEmoji = '🟢';
+    if (todayPoint < 0) {
+      pointEmoji = '🔴';
+    } else if (todayPoint === 0) {
+      pointEmoji = '🟡';
+    }
+
+    responseText += `\n\n📊 Баллы за сегодня: ${todayPoint} ${pointEmoji}`;
+
+    // Don't mention tracking here - already mentioned in previous message
+    // responseText += `\n\n📍 Location tracking active for ${Config.TRACKING_DURATION_MINUTES} minutes...`;
+
+    await ctx.reply(responseText, {
+      ...Keyboards.getMainMenu(ctx.from.id),
+      parse_mode: 'Markdown'
+    });
+    logger.info(`Arrival with location logged for ${user.nameFull}: ${details}`);
+
+  } catch (error) {
+    logger.error(`Error processing arrival with location: ${error.message}`);
+    await ctx.reply(
+      '❌ К сожалению, произошла ошибка при отметке прихода. Пожалуйста, попробуйте снова или обратитесь к администратору.',
+      Keyboards.getMainMenu(ctx.from.id)
+    );
+  }
+}
+
+/**
  * Setup attendance handlers
  */
 function setupAttendanceHandlers(bot) {
@@ -58,7 +214,7 @@ function setupAttendanceHandlers(bot) {
     if (status.currentlyOut) {
       await ctx.reply(
         `❌ Вы временно вышли из офиса.\n` +
-        `Сначала отметьте возвращение кнопкой "↩️ Вернулся".`,
+        `Пожалуйста, сначала отметьте возвращение кнопкой "↩️ Вернулся".`,
         await getMainMenuKeyboard(ctx.from.id)
       );
       return;
@@ -85,7 +241,7 @@ function setupAttendanceHandlers(bot) {
     // Check if already marked as absent today
     if (status.isAbsent) {
       await ctx.reply(
-        `❌ Вы уже отметили отсутствие сегодня. Вы не можете прийти в офис! 🤔`,
+        `❌ Вы уже отметили отсутствие сегодня. К сожалению, Вы не можете отметить приход в офис сегодня! 🤔`,
         await getMainMenuKeyboard(ctx.from.id)
       );
       return;
@@ -98,7 +254,7 @@ function setupAttendanceHandlers(bot) {
     const workTime = CalculatorService.parseWorkTime(user.workTime);
     if (!workTime) {
       await ctx.reply(
-        '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -116,6 +272,47 @@ function setupAttendanceHandlers(bot) {
       );
       return;
     }
+
+    // === LOCATION TRACKING INTEGRATION ===
+    // If location tracking is enabled, request live location
+    if (Config.ENABLE_LOCATION_TRACKING) {
+      // Store check-in state for this user
+      awaitingLocationForCheckIn.set(user.telegramId, {
+        requestTime: Date.now(),
+        user: user,
+        checkInTime: now
+      });
+
+      logger.info(`📍 Requesting location from ${user.nameFull} (${user.telegramId}) for check-in`);
+
+      // Request live location with keyboard - keep original format
+      const keyboard = {
+        keyboard: [[{ text: '📍 Отправить местоположение', request_location: true }]],
+        resize_keyboard: true,
+        one_time_keyboard: true
+      };
+
+      await ctx.reply(
+        `⚠️ ВАЖНО: Пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ\n\n` +
+        `📍 Нажмите кнопку ниже и выберите:\n` +
+        `"Поделиться моим местоположением онлайн" (15 мин или дольше)\n\n` +
+        `❌ Статическое местоположение будет отклонено`,
+        keyboard
+      );
+
+      // Set timeout to clean up if user doesn't send location
+      setTimeout(() => {
+        if (awaitingLocationForCheckIn.has(user.telegramId)) {
+          awaitingLocationForCheckIn.delete(user.telegramId);
+          logger.warn(`Location request timeout for user ${user.telegramId}`);
+        }
+      }, 5 * 60 * 1000); // 5 minutes timeout
+
+      return; // Exit here, will resume when location is received
+    }
+
+    // === FALLBACK: LOCATION TRACKING DISABLED ===
+    // Continue with normal check-in (without location)
 
     // Calculate lateness
     const { latenessMinutes, status: latenessStatus } = CalculatorService.calculateLateness(
@@ -135,7 +332,7 @@ function setupAttendanceHandlers(bot) {
       // Check if user notified about being late
       if (status.lateNotified) {
         // User used late notification, less penalty
-        responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (вы предупредили)\n`;
+        responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (Вы предупредили)\n`;
         details = `late_notified, ${latenessMinutes}min`;
         ratingImpact = CalculatorService.calculateRatingImpact('LATE_NOTIFIED');
       } else {
@@ -233,11 +430,62 @@ function setupAttendanceHandlers(bot) {
     const workTime = CalculatorService.parseWorkTime(user.workTime);
     if (!workTime) {
       await ctx.reply(
-        '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
     }
+
+    // === LOCATION TRACKING INTEGRATION FOR DEPARTURE WITH MESSAGE ===
+    // If location tracking is enabled, request live location
+    if (Config.ENABLE_LOCATION_TRACKING) {
+      // Store checkout state for this user
+      awaitingLocationForCheckout.set(user.telegramId.toString(), {
+        requestTime: Date.now(),
+        user: user,
+        checkoutTime: now,
+        departureType: 'message',
+        message: departureMessage,
+        workTimeData: {
+          workTime: workTime,
+          arrivalTime: status.arrivalTime
+        }
+      });
+
+      logger.info(`📍 Requesting location from ${user.nameFull} (${user.telegramId}) for departure with message`);
+
+      const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
+      const trackingTime = trackingSeconds < 60
+        ? `${trackingSeconds} seconds`
+        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+
+      await ctx.reply(
+        `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
+        `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
+        `⚠️ **IMPORTANT:**\n` +
+        `1️⃣ Tap "📎" (attach) button\n` +
+        `2️⃣ Select "Location"\n` +
+        `3️⃣ Choose "Share My Live Location"\n` +
+        `4️⃣ Set duration to 15 minutes or longer\n\n` +
+        `📍 Verification will take about ${trackingTime}.\n` +
+        `💬 Your message: "${departureMessage}"\n\n` +
+        `❌ Do NOT send "Current Location" - it will be rejected!`,
+        { parse_mode: 'Markdown' }
+      );
+
+      // Set timeout to clean up if user doesn't send location
+      setTimeout(() => {
+        if (awaitingLocationForCheckout.has(user.telegramId.toString())) {
+          awaitingLocationForCheckout.delete(user.telegramId.toString());
+          logger.warn(`Checkout location request timeout for user ${user.telegramId}`);
+        }
+      }, 5 * 60 * 1000); // 5 minutes timeout
+
+      return; // Exit here - wait for location
+    }
+
+    // === FALLBACK: LOCATION TRACKING DISABLED ===
+    // Continue with normal departure (without location)
 
     let responseText = `✅ Отмечен уход: ${now.format('HH:mm')}\n`;
     responseText += `💬 Сообщение: "${departureMessage}"\n`;
@@ -423,12 +671,13 @@ function setupAttendanceHandlers(bot) {
 
     if (!workTime) {
       await ctx.reply(
-        '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
     }
 
+    // === CHECK FOR EARLY DEPARTURE FIRST ===
     // Check if leaving before shift even started
     if (now.isBefore(workTime.start)) {
       const minutesBeforeShift = workTime.start.diff(now, 'minutes');
@@ -494,6 +743,59 @@ function setupAttendanceHandlers(bot) {
 
     if (workedFullHours && isLeavingEarly) {
       // Worked full hours but leaving before official end time
+      // REQUEST LOCATION if enabled
+      if (Config.ENABLE_LOCATION_TRACKING) {
+        // Store checkout state
+        awaitingLocationForCheckout.set(user.telegramId.toString(), {
+          requestTime: Date.now(),
+          user: user,
+          checkoutTime: now,
+          departureType: 'button',
+          workTimeData: {
+            workTime: workTime,
+            arrivalTime: status.arrivalTime
+          }
+        });
+
+        const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
+        const trackingTime = trackingSeconds < 60
+          ? `${trackingSeconds} seconds`
+          : `${Math.round(trackingSeconds / 60)} minute(s)`;
+
+        await ctx.reply(
+          `✅ Вы отработали требуемое количество часов!\n\n` +
+          `Требуется: ${requiredWorkHours} часа\n` +
+          `Вы отработали: ${actualWorkedHours} часа\n\n` +
+          `⚠️ Но вы уходите раньше официального времени окончания работы (${requiredEndTime.format('HH:mm')}).\n\n` +
+          `📍 Пожалуйста, подтвердите ваше местоположение для завершения.`,
+          Keyboards.getMainMenu(ctx.from.id)
+        );
+
+        await ctx.reply(
+          `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
+          `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
+          `⚠️ **IMPORTANT:**\n` +
+          `1️⃣ Tap "📎" (attach) button\n` +
+          `2️⃣ Select "Location"\n` +
+          `3️⃣ Choose "Share My Live Location"\n` +
+          `4️⃣ Set duration to 15 minutes or longer\n\n` +
+          `📍 Verification will take about ${trackingTime}.\n\n` +
+          `❌ Do NOT send "Current Location" - it will be rejected!`,
+          { parse_mode: 'Markdown' }
+        );
+
+        // Set timeout - 5 minutes
+        setTimeout(() => {
+          if (awaitingLocationForCheckout.has(user.telegramId.toString())) {
+            awaitingLocationForCheckout.delete(user.telegramId.toString());
+            logger.warn(`Checkout location request timeout for user ${user.telegramId}`);
+          }
+        }, 5 * 60 * 1000);
+
+        return; // Exit here - wait for location
+      }
+
+      // FALLBACK: Location tracking disabled
       await sheetsService.logEvent(
         user.telegramId,
         user.nameFull,
@@ -535,11 +837,55 @@ function setupAttendanceHandlers(bot) {
         `Требуется: ${requiredWorkHours} часа\n` +
         `Вы отработали: ${actualWorkedHours} часа\n` +
         `Осталось: ${remainingHours} часа\n\n` +
-        `Пожалуйста, укажите причину раннего ухода:`,
+        `📝 Пожалуйста, укажите причину раннего ухода:`,
         Keyboards.getEarlyDepartureReasonKeyboard()
       );
+      return;
     } else {
-      // Leaving on time or later - just say goodbye
+      // Leaving on time or later - REQUEST LOCATION if enabled
+      if (Config.ENABLE_LOCATION_TRACKING) {
+        // Store checkout state
+        awaitingLocationForCheckout.set(user.telegramId.toString(), {
+          requestTime: Date.now(),
+          user: user,
+          checkoutTime: now,
+          departureType: 'button',
+          workTimeData: {
+            workTime: workTime,
+            arrivalTime: status.arrivalTime
+          }
+        });
+
+        const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
+        const trackingTime = trackingSeconds < 60
+          ? `${trackingSeconds} seconds`
+          : `${Math.round(trackingSeconds / 60)} minute(s)`;
+
+        await ctx.reply(
+          `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
+          `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
+          `⚠️ **IMPORTANT:**\n` +
+          `1️⃣ Tap "📎" (attach) button\n` +
+          `2️⃣ Select "Location"\n` +
+          `3️⃣ Choose "Share My Live Location"\n` +
+          `4️⃣ Set duration to 15 minutes or longer\n\n` +
+          `📍 Verification will take about ${trackingTime}.\n\n` +
+          `❌ Do NOT send "Current Location" - it will be rejected!`,
+          { parse_mode: 'Markdown' }
+        );
+
+        // Set timeout - 5 minutes
+        setTimeout(() => {
+          if (awaitingLocationForCheckout.has(user.telegramId.toString())) {
+            awaitingLocationForCheckout.delete(user.telegramId.toString());
+            logger.warn(`Checkout location request timeout for user ${user.telegramId}`);
+          }
+        }, 5 * 60 * 1000);
+
+        return; // Exit here - wait for location
+      }
+
+      // FALLBACK: Location tracking disabled - process departure without location
       await sheetsService.logEvent(
         user.telegramId,
         user.nameFull,
@@ -581,7 +927,7 @@ function setupAttendanceHandlers(bot) {
 
     if (!workTime) {
       await ctx.reply(
-        '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -803,7 +1149,7 @@ function setupAttendanceHandlers(bot) {
         const workTime = CalculatorService.parseWorkTime(user.workTime);
         if (!workTime) {
           await ctx.reply(
-            '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+            '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
             Keyboards.getMainMenu(ctx.from.id)
           );
           delete ctx.session.awaitingLateDuration;
@@ -894,7 +1240,7 @@ function setupAttendanceHandlers(bot) {
       const workTime = CalculatorService.parseWorkTime(user.workTime);
       if (!workTime) {
         await ctx.reply(
-          '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+          '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
           Keyboards.getMainMenu(ctx.from.id)
         );
         delete ctx.session.awaitingDepartureMessage;
@@ -1044,7 +1390,56 @@ function setupAttendanceHandlers(bot) {
       }
 
       const reason = ctx.message.text.trim();
+      const now = moment.tz(Config.TIMEZONE);
+      const workTime = CalculatorService.parseWorkTime(user.workTime);
 
+      // REQUEST LOCATION FOR EARLY DEPARTURE if location tracking enabled
+      if (Config.ENABLE_LOCATION_TRACKING && workTime) {
+        // Store checkout state with early departure reason
+        awaitingLocationForCheckout.set(user.telegramId.toString(), {
+          requestTime: Date.now(),
+          user: user,
+          checkoutTime: now,
+          departureType: 'early_reason',
+          message: reason,
+          workTimeData: {
+            workTime: workTime,
+            arrivalTime: status.arrivalTime
+          }
+        });
+
+        const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
+        const trackingTime = trackingSeconds < 60
+          ? `${trackingSeconds} seconds`
+          : `${Math.round(trackingSeconds / 60)} minute(s)`;
+
+        await ctx.reply(
+          `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
+          `Для подтверждения раннего ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
+          `⚠️ **IMPORTANT:**\n` +
+          `1️⃣ Tap "📎" (attach) button\n` +
+          `2️⃣ Select "Location"\n` +
+          `3️⃣ Choose "Share My Live Location"\n` +
+          `4️⃣ Set duration to 15 minutes or longer\n\n` +
+          `📍 Verification will take about ${trackingTime}.\n` +
+          `💬 Reason: "${reason}"\n\n` +
+          `❌ Do NOT send "Current Location" - it will be rejected!`,
+          { parse_mode: 'Markdown' }
+        );
+
+        // Set timeout to clean up if user doesn't send location
+        setTimeout(() => {
+          if (awaitingLocationForCheckout.has(user.telegramId.toString())) {
+            awaitingLocationForCheckout.delete(user.telegramId.toString());
+            logger.warn(`Checkout location request timeout for user ${user.telegramId}`);
+          }
+        }, 5 * 60 * 1000); // 5 minutes timeout
+
+        delete ctx.session.awaitingEarlyDepartureReason;
+        return; // Exit here - wait for location
+      }
+
+      // FALLBACK: Location tracking disabled - process departure without location
       // Log departure with early reason
       await sheetsService.logEvent(
         user.telegramId,
@@ -1065,8 +1460,6 @@ function setupAttendanceHandlers(bot) {
       } else if (todayPoint === 0) {
         pointEmoji = '🟡';
       }
-
-      const now = moment.tz(Config.TIMEZONE);
 
       await ctx.reply(
         `✅ Отмечен уход: ${now.format('HH:mm')}\n` +
@@ -1095,7 +1488,7 @@ function setupAttendanceHandlers(bot) {
 
     if (!workTime) {
       await ctx.reply(
-        '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -1252,7 +1645,60 @@ function setupAttendanceHandlers(bot) {
     };
 
     const reasonText = reasons[reasonCode] || 'Не указана';
+    const now = moment.tz(Config.TIMEZONE);
+    const workTime = CalculatorService.parseWorkTime(user.workTime);
 
+    // REQUEST LOCATION FOR EARLY DEPARTURE if location tracking enabled
+    if (Config.ENABLE_LOCATION_TRACKING && workTime) {
+      // Store checkout state with early departure reason
+      awaitingLocationForCheckout.set(user.telegramId.toString(), {
+        requestTime: Date.now(),
+        user: user,
+        checkoutTime: now,
+        departureType: 'early_reason',
+        message: reasonText,
+        workTimeData: {
+          workTime: workTime,
+          arrivalTime: status.arrivalTime
+        }
+      });
+
+      const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
+      const trackingTime = trackingSeconds < 60
+        ? `${trackingSeconds} seconds`
+        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+
+      await ctx.editMessageText(
+        `✅ Причина: ${reasonText}\n\n` +
+        `📍 Теперь подтвердите ваше местоположение.`
+      );
+
+      await ctx.reply(
+        `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
+        `To confirm your early departure, please share your LIVE location.\n\n` +
+        `⚠️ **IMPORTANT:**\n` +
+        `1️⃣ Tap "📎" (attach) button\n` +
+        `2️⃣ Select "Location"\n` +
+        `3️⃣ Choose "Share My Live Location"\n` +
+        `4️⃣ Set duration to 15 minutes or longer\n\n` +
+        `📍 Verification will take about ${trackingTime}.\n` +
+        `💬 Reason: "${reasonText}"\n\n` +
+        `❌ Do NOT send "Current Location" - it will be rejected!`,
+        { parse_mode: 'Markdown' }
+      );
+
+      // Set timeout to clean up if user doesn't send location
+      setTimeout(() => {
+        if (awaitingLocationForCheckout.has(user.telegramId.toString())) {
+          awaitingLocationForCheckout.delete(user.telegramId.toString());
+          logger.warn(`Checkout location request timeout for user ${user.telegramId}`);
+        }
+      }, 5 * 60 * 1000); // 5 minutes timeout
+
+      return; // Exit here - wait for location
+    }
+
+    // FALLBACK: Location tracking disabled - process departure without location
     // Log departure with early reason
     await sheetsService.logEvent(
       user.telegramId,
@@ -1273,8 +1719,6 @@ function setupAttendanceHandlers(bot) {
     } else if (todayPoint === 0) {
       pointEmoji = '🟡';
     }
-
-    const now = moment.tz(Config.TIMEZONE);
 
     await ctx.editMessageText(
       `✅ Отмечен уход: ${now.format('HH:mm')}\n` +
@@ -1299,7 +1743,7 @@ function setupAttendanceHandlers(bot) {
 
     if (!workTime) {
       await ctx.reply(
-        '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -1473,7 +1917,7 @@ function setupAttendanceHandlers(bot) {
         const workTime = CalculatorService.parseWorkTime(user.workTime);
         if (!workTime) {
           await ctx.reply(
-            '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+            '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
             Keyboards.getMainMenu(ctx.from.id)
           );
           delete ctx.session.awaitingExtendCustomDuration;
@@ -1745,6 +2189,74 @@ function setupAttendanceHandlers(bot) {
     } catch (error) {
       await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
       logger.error(`Error in overtime arrival: ${error.message}`);
+    }
+  });
+
+  // Handle overnight worker "still working" button
+  bot.action(/^overnight_still_working:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+
+    const user = await getUserOrPromptRegistration(ctx);
+    if (!user) return;
+
+    const tomorrow = ctx.match[1]; // Date in YYYY-MM-DD format
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const currentTime = now.format('HH:mm');
+
+      // Initialize tomorrow's sheet if needed
+      await sheetsService.initializeDailySheet(tomorrow);
+
+      // Get tomorrow's sheet
+      const worksheet = await sheetsService.getWorksheet(tomorrow);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      // Find employee row
+      const employeeRow = rows.find(row => {
+        const rowTelegramId = (row.get('TelegramId') || '').toString().trim();
+        return rowTelegramId === user.telegramId.toString();
+      });
+
+      if (!employeeRow) {
+        await ctx.editMessageText(
+          `❌ Ошибка: не удалось найти вас в листе ${tomorrow}\n\n` +
+          `Попробуйте отметить приход обычным способом.`
+        );
+        return;
+      }
+
+      // Mark arrival for the new day
+      employeeRow.set('When come', currentTime);
+      employeeRow.set('Came on time', 'true'); // Coming overnight is considered on time
+      await employeeRow.save();
+
+      // Log event
+      await sheetsService.logEvent(
+        user.telegramId,
+        user.nameFull,
+        'OVERNIGHT_CONTINUATION',
+        `Продолжение работы с предыдущего дня на ${tomorrow}`,
+        0.5 // Bonus for overnight work
+      );
+
+      const formattedDate = moment.tz(tomorrow, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
+
+      await ctx.editMessageText(
+        `✅ Приход отмечен для ${formattedDate}!\n\n` +
+        `⏰ Время: ${currentTime}\n` +
+        `🌙 Продолжение ночной смены\n` +
+        `📊 Бонус: +0.5 балла\n\n` +
+        `Не забудьте отметить уход, когда закончите работу!`
+      );
+
+      await ctx.reply('🏠 Главное меню:', Keyboards.getMainMenu(ctx.from.id));
+
+      logger.info(`Overnight worker ${user.nameFull} marked arrival for ${tomorrow} at ${currentTime}`);
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
+      logger.error(`Error in overnight_still_working: ${error.message}`);
     }
   });
 
@@ -3039,7 +3551,7 @@ function setupAttendanceHandlers(bot) {
     const workTime = CalculatorService.parseWorkTime(user.workTime);
     if (!workTime) {
       await ctx.reply(
-        '❌ Ошибка в вашем расписании. Обратитесь к администратору.',
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -3117,6 +3629,344 @@ function setupAttendanceHandlers(bot) {
     }
 
     await ctx.reply(responseText, Keyboards.getMainMenu(ctx.from.id));
+  });
+
+  /**
+   * Process departure/checkout with location verification
+   * @param {Object} ctx - Telegram context
+   * @param {Object} user - User object
+   * @param {Object} location - Location object
+   * @param {Object} checkoutState - Checkout state with workTimeData
+   * @returns {Promise<void>}
+   */
+  async function processDepartureWithLocation(ctx, user, location, checkoutState) {
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+
+      // Start tracking session for departure
+      const trackingResult = locationTrackerService.startTracking(
+        user.telegramId,
+        {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          accuracy: location.horizontal_accuracy || location.accuracy || null
+        },
+        user.nameFull
+      );
+
+      if (!trackingResult.success) {
+        logger.error(`Failed to start tracking for ${user.nameFull} departure: ${trackingResult.error}`);
+        // Continue with checkout anyway
+      }
+
+      // Check for initial location anomaly (outside geofence = fraud)
+      let isFraudulent = false;
+      let fraudReason = '';
+
+      if (trackingResult.hasInitialAnomaly) {
+        const anomaly = trackingResult.initialAnomaly;
+        logger.warn(`Initial departure location anomaly for ${user.nameFull}: ${anomaly.type}`);
+
+        // If CRITICAL (wrong location - outside geofence), flag as fraud
+        if (anomaly.severity === 'CRITICAL' && anomaly.type === 'WRONG_LOCATION') {
+          isFraudulent = true;
+          fraudReason = anomaly.description;
+
+          logger.error(`🚨 FRAUD DETECTED: ${user.nameFull} trying to checkout from outside office!`);
+          logger.error(`   Reason: ${fraudReason}`);
+
+          // Log fraud event
+          await sheetsService.logEvent(
+            user.telegramId,
+            user.nameFull,
+            'CHECKOUT_FRAUD',
+            `Location outside office: ${fraudReason}`,
+            -2.0 // Heavy penalty for fraud attempt
+          );
+
+          // Notify admins about fraudulent checkout attempt
+          const adminIds = Config.ADMIN_TELEGRAM_IDS;
+          const alertMessage =
+            `🚨 **FRAUD ALERT: Suspicious Checkout**\n\n` +
+            `👤 User: ${user.nameFull}\n` +
+            `📱 Telegram ID: ${user.telegramId}\n` +
+            `⚠️ Reason: ${fraudReason}\n` +
+            `📍 Location: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}\n` +
+            `🕐 Time: ${now.format('HH:mm:ss')}`;
+
+          for (const adminId of adminIds) {
+            try {
+              await ctx.telegram.sendMessage(adminId, alertMessage, { parse_mode: 'Markdown' });
+            } catch (error) {
+              logger.error(`Failed to notify admin ${adminId}: ${error.message}`);
+            }
+          }
+
+          // Reject the checkout
+          await ctx.reply(
+            `❌ **Checkout REJECTED**\n\n` +
+            `${fraudReason}\n\n` +
+            `⚠️ This incident has been logged and administrators have been notified.\n\n` +
+            `Please ensure you are at the office location before checking out.`,
+            Keyboards.getMainMenu(ctx.from.id)
+          );
+
+          // Stop tracking
+          locationTrackerService.forceStopTracking(user.telegramId);
+          return;
+        }
+      }
+
+      // Get user's work time from checkout state
+      const workTime = checkoutState.workTimeData.workTime;
+      const arrivalTime = checkoutState.workTimeData.arrivalTime;
+      const checkoutTime = checkoutState.checkoutTime;
+
+      // Parse message if departure was via message or early reason
+      let departureMessage = '';
+      if (checkoutState.departureType === 'message' || checkoutState.departureType === 'early_reason') {
+        departureMessage = checkoutState.message || '';
+      }
+
+      // Calculate worked hours
+      const workedMinutes = checkoutTime.diff(moment.tz(arrivalTime, 'HH:mm', Config.TIMEZONE), 'minutes');
+      const workedHours = (workedMinutes / 60).toFixed(2);
+
+      // Check if leaving early
+      const scheduledEnd = workTime.end;
+      const isEarly = checkoutTime.isBefore(scheduledEnd);
+      const earlyMinutes = isEarly ? scheduledEnd.diff(checkoutTime, 'minutes') : 0;
+
+      let responseText = `✅ **Checkout recorded!**\n\n`;
+      let eventType = 'DEPARTURE';
+      let details = departureMessage ? `message: ${departureMessage}` : 'normal';
+      let ratingImpact = 0.0;
+
+      if (isEarly) {
+        responseText += `⚠️ Early departure: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
+        details = `early_${earlyMinutes}min` + (departureMessage ? `, msg: ${departureMessage}` : '');
+
+        // Check if message was provided
+        if (Config.REQUIRE_DEPARTURE_MESSAGE && !departureMessage) {
+          ratingImpact = CalculatorService.calculateRatingImpact('LEFT_WITHOUT_MESSAGE');
+          responseText += `⚠️ Left early without message: ${ratingImpact} points\n`;
+        } else if (departureMessage) {
+          ratingImpact = CalculatorService.calculateRatingImpact('EARLY_DEPARTURE');
+          responseText += `📝 Message provided: ${departureMessage}\n`;
+        }
+      } else {
+        responseText += `✅ Left on time or later\n`;
+      }
+
+      responseText += `\n⏱️ Worked: ${workedHours} hours\n`;
+      responseText += `📍 Location verified`;
+
+      // Log departure event
+      await sheetsService.logEvent(
+        user.telegramId,
+        user.nameFull,
+        eventType,
+        details,
+        ratingImpact
+      );
+
+      // Store departure location data
+      await sheetsService.updateDepartureLocation(
+        user.telegramId,
+        { latitude: location.latitude, longitude: location.longitude },
+        location.horizontal_accuracy || location.accuracy || null
+      );
+
+      // Get today's points
+      const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
+      const todayPoint = updatedStatus.todayPoint || 0;
+      let pointEmoji = '🟢';
+      if (todayPoint < 0) {
+        pointEmoji = '🔴';
+      } else if (todayPoint === 0) {
+        pointEmoji = '🟡';
+      }
+
+      responseText += `\n\n📊 Points today: ${todayPoint} ${pointEmoji}`;
+      responseText += `\n\n👋 Have a great evening!`;
+
+      await ctx.reply(responseText, {
+        ...Keyboards.getMainMenu(ctx.from.id),
+        parse_mode: 'Markdown'
+      });
+
+      logger.info(`Departure with location logged for ${user.nameFull}: ${details}`);
+
+    } catch (error) {
+      logger.error(`Error processing departure with location: ${error.message}`);
+      await ctx.reply(
+        '❌ Error recording checkout. Please try again or contact administrator.',
+        Keyboards.getMainMenu(ctx.from.id)
+      );
+    }
+  }
+
+  /**
+   * Handle checkout/departure location processing
+   * @param {Object} ctx - Telegram context
+   * @param {string} userId - User's Telegram ID
+   * @param {Object} location - Location object from Telegram
+   */
+  async function handleCheckoutLocation(ctx, userId, location) {
+    try {
+      // Get checkout state
+      const checkoutState = awaitingLocationForCheckout.get(userId);
+      const user = checkoutState.user;
+
+      // Check if this is LIVE location or static location
+      const isLiveLocation = ctx.message.location.live_period !== undefined;
+
+      logger.info(`📍 Received checkout location from ${user.nameFull} (${userId})`);
+      logger.info(`   Location type: ${isLiveLocation ? 'LIVE ✅' : 'STATIC ❌'}`);
+
+      // ONLY accept LIVE location - REJECT static location
+      if (!isLiveLocation) {
+        logger.warn(`❌ User ${user.nameFull} sent STATIC location for checkout - REJECTED`);
+
+        // Clean up the awaiting state
+        awaitingLocationForCheckout.delete(userId);
+
+        await ctx.reply(
+          `❌ **REJECTED: This is NOT live location data**\n\n` +
+          `⚠️ I only accept LIVE LOCATION, not static location.\n\n` +
+          `Please try again:\n` +
+          `1️⃣ Press "🚪 Ухожу" button\n` +
+          `2️⃣ Tap "📍 Share Location"\n` +
+          `3️⃣ Select "Share My Live Location"\n` +
+          `4️⃣ Choose 15 minutes or longer\n\n` +
+          `Do NOT select "Send My Current Location" - that won't work!`,
+          Keyboards.getMainMenu(ctx.from.id)
+        );
+
+        return; // Exit without processing checkout
+      }
+
+      // Live location accepted
+      logger.info(`✅ User ${user.nameFull} sent LIVE location correctly for checkout`);
+      logger.info(`   Live period: ${ctx.message.location.live_period} seconds`);
+
+      const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
+      const trackingTime = trackingSeconds < 60
+        ? `${trackingSeconds} seconds`
+        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+
+      await ctx.reply(
+        `✅ Live location received!\n\n` +
+        `📍 Verification in progress...\n` +
+        `This will take about ${trackingTime}.\n\n` +
+        `You can use other apps if needed. Processing checkout...`
+      );
+
+      // Clean up the awaiting state
+      awaitingLocationForCheckout.delete(userId);
+
+      // Process departure with location
+      await processDepartureWithLocation(ctx, user, location, checkoutState);
+
+    } catch (error) {
+      logger.error(`Error in checkout location handler: ${error.message}`);
+      await ctx.reply(
+        '❌ Error processing your location. Please try again or contact administrator.',
+        Keyboards.getMainMenu(ctx.from.id)
+      );
+    }
+  }
+
+  // === LOCATION HANDLER FOR CHECK-IN ===
+  // Process location when user sends it after requesting check-in
+  bot.on('location', async (ctx) => {
+    try {
+      // IMPORTANT: Convert to string to match the type stored in the map (from Google Sheets)
+      const userId = ctx.from.id.toString();
+      const location = ctx.message.location;
+
+      logger.debug(`📍 Location received from user ${userId} for check-in`);
+
+      // Check if this user is awaiting location for check-in OR checkout
+      const isAwaitingCheckIn = awaitingLocationForCheckIn.has(userId);
+      const isAwaitingCheckout = awaitingLocationForCheckout.has(userId);
+
+      if (!isAwaitingCheckIn && !isAwaitingCheckout) {
+        // Not awaiting location, ignore (will be handled by main location handler in index.js)
+        return;
+      }
+
+      // HANDLE CHECKOUT LOCATION
+      if (isAwaitingCheckout) {
+        await handleCheckoutLocation(ctx, userId, location);
+        return;
+      }
+
+      // HANDLE CHECK-IN LOCATION (existing logic below)
+
+      // Get check-in state
+      const checkInState = awaitingLocationForCheckIn.get(userId);
+
+      // Get user info
+      const user = checkInState.user;
+
+      // Check if this is LIVE location or static location
+      const isLiveLocation = ctx.message.location.live_period !== undefined;
+
+      logger.info(`📍 Received check-in location from ${user.nameFull} (${userId})`);
+      logger.info(`   Location type: ${isLiveLocation ? 'LIVE ✅' : 'STATIC ❌'}`);
+
+      // ONLY accept LIVE location - REJECT static location
+      if (!isLiveLocation) {
+        logger.warn(`❌ User ${user.nameFull} sent STATIC location - REJECTED`);
+
+        // Clean up the awaiting state
+        awaitingLocationForCheckIn.delete(userId);
+
+        await ctx.reply(
+          `❌ **REJECTED: This is NOT live location data**\n\n` +
+          `⚠️ I only accept LIVE LOCATION, not static location.\n\n` +
+          `Please try again:\n` +
+          `1️⃣ Press "✅ Пришёл" button\n` +
+          `2️⃣ Tap "📍 Share Location"\n` +
+          `3️⃣ Select "Share My Live Location"\n` +
+          `4️⃣ Choose 15 minutes or longer\n\n` +
+          `Do NOT select "Send My Current Location" - that won't work!`,
+          Keyboards.getMainMenu(ctx.from.id)
+        );
+
+        return; // Exit without processing check-in
+      }
+
+      // Live location accepted
+      logger.info(`✅ User ${user.nameFull} sent LIVE location correctly`);
+      logger.info(`   Live period: ${ctx.message.location.live_period} seconds`);
+
+      const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
+      const trackingTime = trackingSeconds < 60
+        ? `${trackingSeconds} seconds`
+        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+
+      await ctx.reply(
+        `✅ Live location received!\n\n` +
+        `📍 Verification in progress...\n` +
+        `This will take about ${trackingTime}.\n\n` +
+        `You can use other apps if needed. Processing check-in...`
+      );
+
+      // Clean up the awaiting state
+      awaitingLocationForCheckIn.delete(userId);
+
+      // Process arrival with location
+      await processArrivalWithLocation(ctx, user, location);
+
+    } catch (error) {
+      logger.error(`Error in check-in location handler: ${error.message}`);
+      await ctx.reply(
+        '❌ Error processing your location. Please try again or contact administrator.',
+        Keyboards.getMainMenu(ctx.from.id)
+      );
+    }
   });
 }
 
@@ -3681,24 +4531,63 @@ async function handleStatus(ctx) {
   response += `Баллы: ${todayPoint} ${pointEmoji}\n`;
   response += `Статус: ${pointMessage}`;
 
-  // Add monthly time balance
-  const balance = await sheetsService.getMonthlyBalance(user.telegramId);
-  response += `\n\n⏱ БАЛАНС ВРЕМЕНИ ЗА МЕСЯЦ:\n`;
+  // Add comprehensive monthly statistics from monthly report
+  const monthlyStats = await sheetsService.getMonthlyStats(user.telegramId);
 
-  if (balance.totalDeficitMinutes > 0) {
-    response += `⚠️ Недоработка: ${CalculatorService.formatTimeDiff(balance.totalDeficitMinutes)}\n`;
-  }
-  if (balance.totalSurplusMinutes > 0) {
-    response += `✅ Переработка: ${CalculatorService.formatTimeDiff(balance.totalSurplusMinutes)}\n`;
-  }
+  if (monthlyStats) {
+    const currentMonth = now.format('MMMM YYYY', 'ru');
+    response += `\n\n📊 СТАТИСТИКА ЗА МЕСЯЦ (${now.format('MMMM YYYY').toUpperCase()}):\n\n`;
 
-  const netBalance = balance.netBalanceMinutes;
-  if (netBalance > 0) {
-    response += `📊 Итого: +${CalculatorService.formatTimeDiff(netBalance)}`;
-  } else if (netBalance < 0) {
-    response += `📊 Итого: -${CalculatorService.formatTimeDiff(Math.abs(netBalance))}`;
+    // Attendance summary
+    response += `📅 Посещаемость:\n`;
+    response += `  • Отработано дней: ${monthlyStats.daysWorked}/${monthlyStats.totalWorkDays}\n`;
+    response += `  • Процент присутствия: ${monthlyStats.attendanceRate.toFixed(1)}%\n`;
+    response += `  • Пропущено: ${monthlyStats.daysAbsent} дней\n`;
+
+    // Punctuality
+    response += `\n⏰ Пунктуальность:\n`;
+    response += `  • Вовремя: ${monthlyStats.onTimeArrivals} раз\n`;
+    response += `  • Опоздания (предупр.): ${monthlyStats.lateArrivalsNotified}\n`;
+    response += `  • Опоздания (без предупр.): ${monthlyStats.lateArrivalsSilent}\n`;
+    response += `  • Процент вовремя: ${monthlyStats.onTimeRate.toFixed(1)}%\n`;
+
+    // Work hours
+    response += `\n⏱ Рабочие часы:\n`;
+    response += `  • Отработано: ${monthlyStats.totalHoursWorked.toFixed(1)} ч\n`;
+    response += `  • Требуется: ${monthlyStats.totalHoursRequired.toFixed(1)} ч\n`;
+
+    // Balance with status emoji
+    response += `\n💰 Баланс времени:\n`;
+    response += `  • Переработка: ${CalculatorService.formatTimeDiff(monthlyStats.totalSurplusMinutes)}\n`;
+    response += `  • Недоработка: ${CalculatorService.formatTimeDiff(monthlyStats.totalDeficitMinutes)}\n`;
+    response += `  • Штрафы: ${CalculatorService.formatTimeDiff(monthlyStats.totalPenaltyMinutes)}\n`;
+    response += `  • Итого: ${monthlyStats.netBalanceHours} ${monthlyStats.balanceStatus}\n`;
+
+    // Rating
+    response += `\n⭐ Рейтинг:\n`;
+    response += `  • Баллов: ${monthlyStats.totalPoints.toFixed(1)}\n`;
+    response += `  • Средний балл: ${monthlyStats.averageDailyPoints.toFixed(2)}\n`;
+    response += `  • Оценка: ${monthlyStats.rating.toFixed(1)}/10 ${monthlyStats.ratingZone}\n`;
   } else {
-    response += `📊 Итого: 0 ч (баланс)`;
+    // Fallback to old balance calculation if monthly report not available
+    const balance = await sheetsService.getMonthlyBalance(user.telegramId);
+    response += `\n\n⏱ БАЛАНС ВРЕМЕНИ ЗА МЕСЯЦ:\n`;
+
+    if (balance.totalDeficitMinutes > 0) {
+      response += `⚠️ Недоработка: ${CalculatorService.formatTimeDiff(balance.totalDeficitMinutes)}\n`;
+    }
+    if (balance.totalSurplusMinutes > 0) {
+      response += `✅ Переработка: ${CalculatorService.formatTimeDiff(balance.totalSurplusMinutes)}\n`;
+    }
+
+    const netBalance = balance.netBalanceMinutes;
+    if (netBalance > 0) {
+      response += `📊 Итого: +${CalculatorService.formatTimeDiff(netBalance)}`;
+    } else if (netBalance < 0) {
+      response += `📊 Итого: -${CalculatorService.formatTimeDiff(Math.abs(netBalance))}`;
+    } else {
+      response += `📊 Итого: 0 ч (баланс)`;
+    }
   }
 
   await ctx.reply(response, Keyboards.getMainMenu(ctx.from.id));

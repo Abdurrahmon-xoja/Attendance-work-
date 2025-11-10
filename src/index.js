@@ -8,6 +8,8 @@ const Config = require('./config');
 const logger = require('./utils/logger');
 const sheetsService = require('./services/sheets.service');
 const schedulerService = require('./services/scheduler.service');
+const locationTrackerService = require('./services/locationTracker.service');
+const anomalyDetectorService = require('./services/anomalyDetector.service');
 const { registrationWizard, setupRegistrationHandlers } = require('./bot/handlers/registration.handler');
 const { setupAttendanceHandlers } = require('./bot/handlers/attendance.handler');
 
@@ -34,6 +36,290 @@ bot.catch((err, ctx) => {
 setupRegistrationHandlers(bot);
 setupAttendanceHandlers(bot);
 
+// Live Location Handler - processes location updates during tracking
+const handleLocationUpdate = async (ctx) => {
+  try {
+    // IMPORTANT: Convert to string to match type used in tracking sessions
+    const userId = ctx.from.id.toString();
+
+    // Only process if location tracking is enabled
+    if (!Config.ENABLE_LOCATION_TRACKING) {
+      return;
+    }
+
+    const location = ctx.message?.location || ctx.update?.edited_message?.location;
+
+    if (!location) {
+      return;
+    }
+
+    // Check if user has an active tracking session
+    if (!locationTrackerService.hasActiveSession(userId)) {
+      return;
+    }
+
+    // Add location update to session
+    const result = locationTrackerService.addLocationUpdate(userId, {
+      latitude: location.latitude,
+      longitude: location.longitude,
+      accuracy: location.horizontal_accuracy || null
+    });
+
+    if (!result.success) {
+      logger.error(`Failed to add location update for user ${userId}: ${result.error}`);
+      return;
+    }
+
+    const session = locationTrackerService.getSession(userId);
+    const updateNum = session ? session.updateCount : '?';
+    logger.info(`📍 Live location update #${updateNum} from user ${userId}: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)} (accuracy: ${location.horizontal_accuracy ? location.horizontal_accuracy.toFixed(1) + 'm' : 'unknown'})`);
+
+    // Check if anomalies detected
+    if (result.hasAnomalies && result.newAnomalies.length > 0) {
+      logger.warn(`⚠️ New anomalies detected for user ${userId}: ${result.newAnomalies.map(a => a.type).join(', ')}`);
+
+      // Stop tracking immediately if CRITICAL anomalies only (not HIGH - too sensitive)
+      const hasCritical = result.newAnomalies.some(a => a.severity === 'CRITICAL');
+
+      if (hasCritical) {
+        // Stop tracking and finalize
+        const stopResult = locationTrackerService.stopTracking(userId, 'ANOMALY');
+
+        if (stopResult.success) {
+          const session = stopResult.session;
+          const analysis = stopResult.analysis;
+
+          // Get user info
+          const user = await sheetsService.findEmployeeByTelegramId(userId);
+          const userName = user ? user.nameFull : `User ${userId}`;
+
+          // CRITICAL: Cancel fraudulent arrival - remove check-in from sheets
+          await sheetsService.cancelFraudulentArrival(
+            userId,
+            userName,
+            analysis.anomalies
+          );
+
+          // Update Google Sheets with verification status
+          await sheetsService.updateLocationVerification(
+            userId,
+            'FLAGGED',
+            analysis.anomalies
+          );
+
+          // Send alert to user
+          const alertMessage = `🚨 CHECK-IN REJECTED - FRAUD DETECTED\n\n` +
+            anomalyDetectorService.formatAnomalyMessage(analysis) +
+            `\n\n⛔ Your arrival has been CANCELLED and marked as ABSENT.\n` +
+            `Penalty: -2.0 points\n\n` +
+            `Contact your manager immediately.`;
+          await ctx.reply(alertMessage);
+
+          // Notify admins
+          if (Config.ADMIN_TELEGRAM_IDS && Config.ADMIN_TELEGRAM_IDS.length > 0) {
+            const adminMessage = `🚨 FRAUD ALERT - CHECK-IN CANCELLED\n\n` +
+              `Employee: ${userName}\n` +
+              `User ID: ${userId}\n` +
+              `Anomalies: ${analysis.anomalyCount}\n` +
+              `Severity: ${analysis.severity}\n\n` +
+              `${analysis.summary}\n\n` +
+              `⚠️ Arrival has been REMOVED from attendance sheet.\n` +
+              `Marked as ABSENT with FRAUD ATTEMPT.`;
+
+            for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
+              try {
+                await bot.telegram.sendMessage(adminId, adminMessage);
+              } catch (err) {
+                logger.error(`Failed to send admin alert to ${adminId}: ${err.message}`);
+              }
+            }
+          }
+
+          logger.warn(`🚨 FRAUD DETECTED: Cancelled arrival for user ${userId} (${userName})`);
+        }
+      }
+    }
+
+    // Check if tracking duration completed
+    if (result.shouldStopTracking) {
+      // Stop tracking and finalize
+      const stopResult = locationTrackerService.stopTracking(userId, 'COMPLETED');
+
+      if (stopResult.success) {
+        const session = stopResult.session;
+        const analysis = stopResult.analysis;
+
+        // Update Google Sheets with final verification status
+        await sheetsService.updateLocationVerification(
+          userId,
+          analysis.hasAnomaly ? 'FLAGGED' : 'OK',
+          analysis.anomalies
+        );
+
+        logger.info(`✅ Location tracking completed for user ${userId}: ${stopResult.verificationStatus}`);
+
+        // Notify user of completion
+        if (!analysis.hasAnomaly) {
+          // Successful verification
+          await ctx.reply(
+            `✅ **Location verification complete!**\n\n` +
+            `Your location has been successfully verified.\n` +
+            `No anomalies detected. Thank you! 🎉`,
+            { parse_mode: 'Markdown' }
+          );
+        }
+
+        // If anomalies found, notify user and admins
+        if (analysis.hasAnomaly) {
+          const user = await sheetsService.findEmployeeByTelegramId(userId);
+          const userName = user ? user.nameFull : `User ${userId}`;
+
+          // Check if CRITICAL severity - requires fraud action
+          const hasCriticalAtEnd = analysis.severity === 'CRITICAL';
+
+          if (hasCriticalAtEnd) {
+            // FRAUD DETECTED: Cancel arrival
+            await sheetsService.cancelFraudulentArrival(
+              userId,
+              userName,
+              analysis.anomalies
+            );
+
+            // Send fraud alert to user
+            const alertMessage = `🚨 CHECK-IN REJECTED - FRAUD DETECTED\n\n` +
+              anomalyDetectorService.formatAnomalyMessage(analysis) +
+              `\n\n⛔ Your arrival has been CANCELLED and marked as ABSENT.\n` +
+              `Penalty: -2.0 points\n\n` +
+              `Contact your manager immediately.`;
+            await ctx.reply(alertMessage);
+
+            // Notify admins about fraud
+            if (Config.ADMIN_TELEGRAM_IDS && Config.ADMIN_TELEGRAM_IDS.length > 0) {
+              const adminMessage = `🚨 FRAUD ALERT - CHECK-IN CANCELLED\n\n` +
+                `Employee: ${userName}\n` +
+                `User ID: ${userId}\n` +
+                `Anomalies: ${analysis.anomalyCount}\n` +
+                `Severity: ${analysis.severity}\n\n` +
+                `${analysis.summary}\n\n` +
+                `⚠️ Arrival has been REMOVED from attendance sheet.\n` +
+                `Marked as ABSENT with FRAUD ATTEMPT.`;
+
+              for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
+                try {
+                  await bot.telegram.sendMessage(adminId, adminMessage);
+                } catch (err) {
+                  logger.error(`Failed to send fraud alert to ${adminId}: ${err.message}`);
+                }
+              }
+            }
+
+            logger.warn(`🚨 FRAUD DETECTED: Cancelled arrival for user ${userId} (${userName})`);
+          } else {
+            // Minor anomalies - just warn but keep check-in
+            // Send alert to user
+            const alertMessage = anomalyDetectorService.formatAnomalyMessage(analysis);
+            await ctx.reply(alertMessage);
+
+            // Notify admins
+            if (Config.ADMIN_TELEGRAM_IDS && Config.ADMIN_TELEGRAM_IDS.length > 0) {
+              const adminMessage = `⚠️ Location Verification Issue\n\n` +
+                `Employee: ${userName}\n` +
+                `User ID: ${userId}\n` +
+                `Anomalies: ${analysis.anomalyCount}\n` +
+                `Severity: ${analysis.severity}\n\n` +
+                `${analysis.summary}`;
+
+              for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
+                try {
+                  await bot.telegram.sendMessage(adminId, adminMessage);
+                } catch (err) {
+                  logger.error(`Failed to send admin notification to ${adminId}: ${err.message}`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+  } catch (error) {
+    logger.error(`Error processing location update: ${error.message}`);
+    logger.error(error.stack);
+  }
+};
+
+// Register handlers for both new and edited location messages
+bot.on('location', handleLocationUpdate);
+
+// Handle edited messages (live location updates)
+bot.on('edited_message', async (ctx) => {
+  // Check if edited message contains location
+  if (ctx.update.edited_message && ctx.update.edited_message.location) {
+    await handleLocationUpdate(ctx);
+  }
+});
+
+// Periodic check for stopped location updates (runs every 30 seconds)
+if (Config.ENABLE_LOCATION_TRACKING) {
+  setInterval(async () => {
+    const stoppedSessions = locationTrackerService.checkForStoppedSessions();
+
+    if (stoppedSessions.length > 0) {
+      logger.warn(`⚠️ Found ${stoppedSessions.length} sessions with stopped updates`);
+
+      // Handle each stopped session
+      for (const stopped of stoppedSessions) {
+        const stopResult = locationTrackerService.stopTracking(stopped.userId, 'TIMEOUT');
+
+        if (stopResult.success) {
+          const analysis = stopResult.analysis;
+
+          // Check if we have enough data despite timeout
+          if (stopped.hasEnoughData) {
+            // Has enough updates - consider it successful despite early stop
+            await sheetsService.updateLocationVerification(
+              stopped.userId,
+              'OK',
+              analysis.anomalies
+            ).catch(err => {
+              logger.error(`Failed to update verification for stopped session ${stopped.userId}: ${err.message}`);
+            });
+
+            // Notify user of success
+            bot.telegram.sendMessage(
+              parseInt(stopped.userId),
+              `✅ Location verification complete!\n\nReceived ${stopped.updateCount} location updates. Verification successful! 🎉`
+            ).catch(err => {
+              logger.error(`Failed to notify user ${stopped.userId}: ${err.message}`);
+            });
+
+            logger.info(`✅ Verified user ${stopped.userId} with ${stopped.updateCount} updates (stopped early but sufficient data)`);
+          } else {
+            // Insufficient data - flag as problem
+            await sheetsService.updateLocationVerification(
+              stopped.userId,
+              'FLAGGED',
+              analysis.anomalies
+            ).catch(err => {
+              logger.error(`Failed to update verification for stopped session ${stopped.userId}: ${err.message}`);
+            });
+
+            // Notify user
+            bot.telegram.sendMessage(
+              parseInt(stopped.userId),
+              `⚠️ Location tracking stopped too early.\n\nOnly received ${stopped.updateCount} updates (minimum: ${Config.MIN_UPDATES_FOR_VERIFICATION}).\n\nPlease keep Telegram open during check-in.`
+            ).catch(err => {
+              logger.error(`Failed to notify user ${stopped.userId}: ${err.message}`);
+            });
+
+            logger.warn(`Handled stopped session for user ${stopped.userId} - insufficient data`);
+          }
+        }
+      }
+    }
+  }, 30 * 1000); // Every 30 seconds
+}
+
 // Start bot
 async function start() {
   try {
@@ -50,7 +336,7 @@ async function start() {
 
     // Start polling without waiting for connection
     bot.launch({
-      allowedUpdates: ['message', 'callback_query']
+      allowedUpdates: ['message', 'callback_query', 'edited_message']
     }).then(() => {
       logger.info('✅ Telegram bot connected and polling');
     }).catch((err) => {
