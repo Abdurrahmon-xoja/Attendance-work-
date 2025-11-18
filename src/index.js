@@ -4,6 +4,7 @@
  */
 
 const { Telegraf, session, Scenes } = require('telegraf');
+const express = require('express');
 const Config = require('./config');
 const logger = require('./utils/logger');
 const sheetsService = require('./services/sheets.service');
@@ -18,6 +19,19 @@ const bot = new Telegraf(Config.BOT_TOKEN);
 
 // Setup session middleware
 bot.use(session());
+
+// Create Express app for health checks (required by Render)
+const app = express();
+app.get('/', (req, res) => {
+  res.send('Bot is running!');
+});
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    environment: Config.NODE_ENV
+  });
+});
 
 // Create stage and register scenes
 const stage = new Scenes.Stage([registrationWizard]);
@@ -350,6 +364,12 @@ async function start() {
 
     // Initialize scheduler
     schedulerService.init(bot);
+
+    // Start HTTP server for Render health checks
+    const PORT = Config.PORT || 3000;
+    app.listen(PORT, '0.0.0.0', () => {
+      logger.info(`🌐 HTTP server listening on port ${PORT}`);
+    });
 
     logger.info('✅ Bot started successfully!');
     logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
