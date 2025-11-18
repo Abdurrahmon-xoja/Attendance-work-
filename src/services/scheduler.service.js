@@ -303,7 +303,7 @@ class SchedulerService {
           // Use adjusted time if successfully parsed
           if (adjustedTime) {
             workStart = adjustedTime;
-            logger.info(`Adjusted reminder time for ${name}: expected at ${workStart.format('HH:mm')}`);
+            // Note: Adjusted time will be logged when reminder is actually sent
           }
         }
 
@@ -314,6 +314,7 @@ class SchedulerService {
 
         // Use adjusted time for reminder messages if person notified they'll be late
         const reminderTime = workStart.format('HH:mm');
+        const isAdjustedTime = willBeLate.toLowerCase() === 'yes' && lateExpectedArrival.trim();
 
         // Only send reminders if person hasn't taken any action yet
         if (shouldSendReminders) {
@@ -322,7 +323,7 @@ class SchedulerService {
             await this.sendWorkReminder(telegramId, name, 1, reminderTime);
             row.set('reminder_1_sent', 'true');
             await this.retryOperation(async () => await row.save());
-            logger.info(`Sent reminder 1 to ${name} (${telegramId}) at ${currentMinute}`);
+            logger.info(`Sent reminder 1 to ${name} (${telegramId}) at ${currentMinute}${isAdjustedTime ? ` - adjusted for late arrival at ${reminderTime}` : ''}`);
             // Add delay to avoid rate limit
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
@@ -332,7 +333,7 @@ class SchedulerService {
             await this.sendWorkReminder(telegramId, name, 2, reminderTime);
             row.set('reminder_2_sent', 'true');
             await this.retryOperation(async () => await row.save());
-            logger.info(`Sent reminder 2 to ${name} (${telegramId}) at ${currentMinute}`);
+            logger.info(`Sent reminder 2 to ${name} (${telegramId}) at ${currentMinute}${isAdjustedTime ? ` - adjusted for late arrival at ${reminderTime}` : ''}`);
             // Add delay to avoid rate limit
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
@@ -342,7 +343,7 @@ class SchedulerService {
             await this.sendWorkReminder(telegramId, name, 3, reminderTime);
             row.set('reminder_3_sent', 'true');
             await this.retryOperation(async () => await row.save());
-            logger.info(`Sent reminder 3 to ${name} (${telegramId}) at ${currentMinute}`);
+            logger.info(`Sent reminder 3 to ${name} (${telegramId}) at ${currentMinute}${isAdjustedTime ? ` - adjusted for late arrival at ${reminderTime}` : ''}`);
             // Add delay to avoid rate limit
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
