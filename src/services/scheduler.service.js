@@ -13,6 +13,10 @@ class SchedulerService {
   constructor() {
     this.bot = null;
     this.jobs = [];
+    // Track last adjusted end times to prevent redundant updates
+    this._lastAdjustedEndTimes = new Map(); // key: telegramId, value: { endTime, deficitMinutes, date }
+    // FIX #4: Track blocked users to prevent repeated failed message attempts
+    this._blockedUsers = new Map(); // key: telegramId, value: { blockedAt, reason }
   }
 
   /**
@@ -96,6 +100,54 @@ class SchedulerService {
     }
 
     throw lastError;
+  }
+
+  /**
+   * FIX #4: Send Telegram message with blocked user handling
+   * @param {string} telegramId - User's Telegram ID
+   * @param {string} message - Message to send
+   * @param {Object} options - Optional message options
+   * @returns {Promise<boolean>} True if sent successfully, false if user is blocked
+   */
+  async sendMessageSafe(telegramId, message, options = {}) {
+    // Check if user is already known to be blocked
+    if (this._blockedUsers.has(telegramId)) {
+      const blocked = this._blockedUsers.get(telegramId);
+      logger.debug(`Skipping message to blocked user ${telegramId} (blocked since ${blocked.blockedAt})`);
+      return false;
+    }
+
+    try {
+      await this.retryTelegramOperation(async () => {
+        await this.bot.telegram.sendMessage(telegramId, message, options);
+      });
+      return true;
+    } catch (error) {
+      const errCode = error.response?.error_code || error.code;
+      const errDesc = error.response?.description || error.message || '';
+
+      // Check for permanent errors (user blocked bot or chat not found)
+      const PERMANENT_ERROR_CODES = [400, 403];
+      const isPermanentError = PERMANENT_ERROR_CODES.includes(errCode) && (
+        errDesc.includes('chat not found') ||
+        errDesc.includes('bot was blocked') ||
+        errDesc.includes('user is deactivated') ||
+        errDesc.includes('Forbidden')
+      );
+
+      if (isPermanentError) {
+        // Mark user as blocked
+        this._blockedUsers.set(telegramId, {
+          blockedAt: new Date().toISOString(),
+          reason: errDesc
+        });
+        logger.warn(`User ${telegramId} marked as blocked/unreachable: ${errDesc}`);
+        return false;
+      }
+
+      // For other errors, throw to allow retry logic
+      throw error;
+    }
   }
 
   /**
@@ -375,19 +427,16 @@ class SchedulerService {
               ratingImpact
             );
 
-            // Send notification to employee with retry logic
-            try {
-              await this.retryTelegramOperation(async () => {
-                await this.bot.telegram.sendMessage(
-                  telegramId,
-                  `⚠️ Вы автоматически отмечены как опоздавший\n\n` +
-                  `Вы не пришли на работу вовремя (${startTime}).\n` +
-                  `Прошло уже ${minutesSinceStart} минут с начала рабочего дня.\n\n` +
-                  `Пожалуйста, отметьте свой приход, когда придёте.`
-                );
-              });
-            } catch (err) {
-              logger.error(`Failed to send auto-late notification to ${telegramId} after retries: ${err.message}`);
+            // FIX #4: Send notification to employee using safe method
+            const sent = await this.sendMessageSafe(
+              telegramId,
+              `⚠️ Вы автоматически отмечены как опоздавший\n\n` +
+              `Вы не пришли на работу вовремя (${startTime}).\n` +
+              `Прошло уже ${minutesSinceStart} минут с начала рабочего дня.\n\n` +
+              `Пожалуйста, отметьте свой приход, когда придёте.`
+            );
+            if (!sent) {
+              logger.warn(`Could not send auto-late notification to ${telegramId} - user blocked or unreachable`);
             }
 
             logger.info(`Automatically marked ${name} (${telegramId}) as late (${minutesSinceStart} min)`);
@@ -542,7 +591,22 @@ class SchedulerService {
           // Add deficit time to required end time
           if (deficitMinutes > 0) {
             workEnd = workEnd.clone().add(deficitMinutes, 'minutes');
-            logger.info(`Adjusted end time for ${name}: ${workEnd.format('HH:mm')} (+${deficitMinutes} min deficit)`);
+
+            // FIX #1: Only log if the end time actually changed
+            const cacheKey = `${telegramId}-${now.format('YYYY-MM-DD')}`;
+            const cached = this._lastAdjustedEndTimes.get(cacheKey);
+            const newEndTime = workEnd.format('HH:mm');
+
+            // Only log and update if this is a new adjustment or values changed
+            if (!cached || cached.endTime !== newEndTime || cached.deficitMinutes !== deficitMinutes) {
+              logger.info(`Adjusted end time for ${name}: ${newEndTime} (+${deficitMinutes} min deficit)`);
+              this._lastAdjustedEndTimes.set(cacheKey, {
+                endTime: newEndTime,
+                deficitMinutes: deficitMinutes,
+                date: now.format('YYYY-MM-DD')
+              });
+            }
+            // Otherwise skip logging - no change detected
           }
         } catch (balanceErr) {
           logger.error(`Error getting balance for ${name}: ${balanceErr.message}`);
@@ -589,6 +653,14 @@ class SchedulerService {
           } catch (err) {
             logger.error(`Failed to send departure reminder to ${telegramId}: ${err.message}`);
           }
+        }
+      }
+
+      // FIX #1: Clean up old cached end times (keep only today's entries)
+      const today = now.format('YYYY-MM-DD');
+      for (const [key, value] of this._lastAdjustedEndTimes.entries()) {
+        if (value.date !== today) {
+          this._lastAdjustedEndTimes.delete(key);
         }
       }
     } catch (error) {
@@ -1080,22 +1152,19 @@ class SchedulerService {
           noShowCount++;
           logger.warn(`Marked ${name} (${telegramId}) as no-show with ${Config.NO_SHOW_PENALTY} points`);
 
-          // Send notification to user if telegram ID exists
+          // FIX #4: Send notification to user using safe method
           if (telegramId && this.bot) {
-            try {
-              await this.retryTelegramOperation(async () => {
-                await this.bot.telegram.sendMessage(
-                  telegramId,
-                  `⚠️ ВЫ ПОЛУЧИЛИ ШТРАФ\n\n` +
-                  `❌ Причина: Отсутствие без уведомления\n` +
-                  `📅 Дата: ${moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY')}\n\n` +
-                  `Вы не отметили приход, не уведомили об опоздании и не отметили отсутствие.\n\n` +
-                  `🔴 Штраф: ${Config.NO_SHOW_PENALTY} баллов\n\n` +
-                  `Пожалуйста, всегда уведомляйте о своём отсутствии!`
-                );
-              });
-            } catch (msgError) {
-              logger.error(`Failed to send no-show notification to ${telegramId} after retries: ${msgError.message}`);
+            const sent = await this.sendMessageSafe(
+              telegramId,
+              `⚠️ ВЫ ПОЛУЧИЛИ ШТРАФ\n\n` +
+              `❌ Причина: Отсутствие без уведомления\n` +
+              `📅 Дата: ${moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY')}\n\n` +
+              `Вы не отметили приход, не уведомили об опоздании и не отметили отсутствие.\n\n` +
+              `🔴 Штраф: ${Config.NO_SHOW_PENALTY} баллов\n\n` +
+              `Пожалуйста, всегда уведомляйте о своём отсутствии!`
+            );
+            if (!sent) {
+              logger.warn(`Could not send no-show notification to ${telegramId} - user blocked or unreachable`);
             }
           }
 
@@ -1232,28 +1301,25 @@ class SchedulerService {
 
           logger.info(`Auto-ended work for overnight worker: ${name} (${telegramId}) at ${endTime}`);
 
-          // Send notification with button
+          // FIX #4: Send notification with button using safe method
           if (this.bot) {
-            try {
-              const tomorrow = moment.tz(dateStr, Config.TIMEZONE).add(1, 'day').format('YYYY-MM-DD');
-              const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY');
-              const formattedTomorrow = moment.tz(tomorrow, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
+            const tomorrow = moment.tz(dateStr, Config.TIMEZONE).add(1, 'day').format('YYYY-MM-DD');
+            const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY');
+            const formattedTomorrow = moment.tz(tomorrow, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
 
-              await this.retryTelegramOperation(async () => {
-                await this.bot.telegram.sendMessage(
-                  telegramId,
-                  `⚠️ Ваше рабочее время автоматически завершено\n\n` +
-                  `📅 Дата: ${formattedDate}\n` +
-                  `🕐 Время окончания: ${endTime}\n` +
-                  `⏱ Отработано часов: ${hoursWorked.toFixed(2)}\n\n` +
-                  `Если вы всё ещё работаете ночную смену, нажмите кнопку ниже, чтобы отметить приход на новый день (${formattedTomorrow}):`,
-                  Markup.inlineKeyboard([
-                    [Markup.button.callback('✅ Я всё ещё здесь - Отметить приход', `overnight_still_working:${tomorrow}`)]
-                  ])
-                );
-              });
-            } catch (msgError) {
-              logger.error(`Failed to send overnight notification to ${telegramId} after retries: ${msgError.message}`);
+            const sent = await this.sendMessageSafe(
+              telegramId,
+              `⚠️ Ваше рабочее время автоматически завершено\n\n` +
+              `📅 Дата: ${formattedDate}\n` +
+              `🕐 Время окончания: ${endTime}\n` +
+              `⏱ Отработано часов: ${hoursWorked.toFixed(2)}\n\n` +
+              `Если вы всё ещё работаете ночную смену, нажмите кнопку ниже, чтобы отметить приход на новый день (${formattedTomorrow}):`,
+              Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Я всё ещё здесь - Отметить приход', `overnight_still_working:${tomorrow}`)]
+              ])
+            );
+            if (!sent) {
+              logger.warn(`Could not send overnight notification to ${telegramId} - user blocked or unreachable`);
             }
           }
 
@@ -1313,9 +1379,74 @@ class SchedulerService {
           return (telegramId && rowTelegramId === telegramId) || rowName === name;
         });
 
+        // FIX #5: Auto-add employee to monthly report if missing
         if (!monthlyRow) {
-          logger.warn(`Employee ${name} not found in monthly report - skipping`);
-          continue;
+          logger.warn(`Employee ${name} (${telegramId}) not found in monthly report - auto-adding now`);
+
+          try {
+            // Get employee info from roster to populate initial data
+            const roster = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
+            await roster.loadHeaderRow();
+            const rosterRows = await roster.getRows();
+
+            let workSchedule = '';
+            let company = '';
+
+            // Find employee in roster
+            for (const rosterRow of rosterRows) {
+              const rosterTelegramId = (rosterRow.get('Telegram Id') || '').toString().trim();
+              const rosterName = (rosterRow.get('Name full') || '').toString().trim();
+
+              if ((telegramId && rosterTelegramId === telegramId) || rosterName === name) {
+                workSchedule = rosterRow.get('Work time') || '';
+                company = rosterRow.get('Company') || '';
+                break;
+              }
+            }
+
+            // Add new row to monthly report
+            monthlyRow = await monthlySheet.addRow({
+              'Name': name,
+              'Telegram ID': telegramId,
+              'Company': company,
+              'Work Schedule': workSchedule,
+              'Total Work Days': 0,
+              'Days Worked': 0,
+              'Days Absent': 0,
+              'Days Absent (Notified)': 0,
+              'Days Absent (Silent)': 0,
+              'On Time Arrivals': 0,
+              'Late Arrivals (Notified)': 0,
+              'Late Arrivals (Silent)': 0,
+              'Early Departures': 0,
+              'Early Departures (Worked Full Hours)': 0,
+              'Left Before Shift': 0,
+              'Total Hours Required': 0,
+              'Total Hours Worked': 0,
+              'Hours Deficit/Surplus': 0,
+              'Total Penalty Minutes': 0,
+              'Total Deficit Minutes': 0,
+              'Total Surplus Minutes': 0,
+              'Net Balance Minutes': 0,
+              'Net Balance (Hours)': '0:00',
+              'Balance Status': '⚪ None',
+              'Total Points': 0,
+              'Average Daily Points': 0,
+              'Attendance Rate %': 0,
+              'On-Time Rate %': 0,
+              'Rating (0-10)': 0,
+              'Rating Zone': '⚪',
+              'Last Updated': ''
+            });
+
+            // Add to the monthlyRows array so we can continue processing
+            monthlyRows.push(monthlyRow);
+
+            logger.info(`✅ Successfully added ${name} to monthly report ${reportSheetName}`);
+          } catch (addError) {
+            logger.error(`Failed to auto-add employee ${name} to monthly report: ${addError.message}`);
+            continue; // Skip this employee if we can't add them
+          }
         }
 
         // Get daily data

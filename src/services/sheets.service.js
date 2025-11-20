@@ -20,6 +20,8 @@ class SheetsService {
     this._pendingInvalidations = new Map(); // Delayed cache invalidation
     this._activeOperations = new Map(); // Track active operations to prevent cache invalidation
     this._initializationLocks = new Map(); // Prevent concurrent sheet initialization
+    // FIX #2 & #3: Cache initialization state to prevent redundant checks
+    this._initializedSheets = new Map(); // key: sheetName, value: { initialized: true, timestamp }
   }
 
   /**
@@ -134,6 +136,8 @@ class SheetsService {
         const stillActiveOps = this._activeOperations.get(sheetName) || 0;
         if (stillActiveOps === 0) {
           this._dailySheetCache.delete(sheetName);
+          // FIX #2 & #3: Also clear initialization cache for this sheet
+          this._initializedSheets.delete(sheetName);
           this._pendingInvalidations.delete(sheetName);
           logger.debug(`Cache invalidated for sheet: ${sheetName} (delayed)`);
         } else {
@@ -146,6 +150,8 @@ class SheetsService {
       // Immediate full invalidation
       this._dailySheetCache.clear();
       this._rosterCache = null;
+      // FIX #2 & #3: Also clear initialization cache
+      this._initializedSheets.clear();
       logger.debug('All cache invalidated');
     }
   }
@@ -425,6 +431,13 @@ class SheetsService {
     try {
       const sheetName = dateStr; // e.g., "2025-10-29"
 
+      // FIX #2 & #3: Check if sheet is already known to be initialized (cache for 2 minutes)
+      const initCache = this._initializedSheets.get(sheetName);
+      if (initCache && (Date.now() - initCache.timestamp) < 120000) {
+        logger.debug(`Sheet ${sheetName} already initialized (cached), skipping check`);
+        return true;
+      }
+
       // Check if there's already an initialization in progress for this sheet
       if (this._initializationLocks.has(sheetName)) {
         logger.debug(`Sheet ${sheetName} initialization already in progress, waiting...`);
@@ -699,6 +712,12 @@ class SheetsService {
           logger.info(`No new employees to add to ${sheetName}`);
         }
       }
+
+        // FIX #2 & #3: Mark sheet as initialized in cache
+        this._initializedSheets.set(sheetName, {
+          initialized: true,
+          timestamp: Date.now()
+        });
 
         return true;
       } finally {

@@ -241,7 +241,7 @@ function setupAttendanceHandlers(bot) {
     // Check if already marked as absent today
     if (status.isAbsent) {
       await ctx.reply(
-        `❌ Вы уже отметили отсутствие сегодня. К сожалению, Вы не можете отметить приход в офис сегодня! 🤔`,
+        `ℹ️ Вы уже отметили отсутствие на сегодня. К сожалению, отметить приход в офис сегодня уже невозможно. Спасибо за понимание! 🙏`,
         await getMainMenuKeyboard(ctx.from.id)
       );
       return;
@@ -293,10 +293,10 @@ function setupAttendanceHandlers(bot) {
       };
 
       await ctx.reply(
-        `⚠️ ВАЖНО: Пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ\n\n` +
+        `⚠️ ВАЖНО: Пожалуйста, будьте добры, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ ОНЛАЙН\n\n` +
         `📍 Нажмите кнопку ниже и выберите:\n` +
-        `"Поделиться моим местоположением онлайн" (15 мин или дольше)\n\n` +
-        `❌ Статическое местоположение будет отклонено`,
+        `"Поделиться моим местоположением онлайн" (15 минут или дольше)\n\n` +
+        `❌ Обратите внимание: статическое местоположение будет отклонено`,
         keyboard
       );
 
@@ -408,7 +408,7 @@ function setupAttendanceHandlers(bot) {
 
     if (!status.hasArrived) {
       await ctx.reply(
-        '❌ Вы не отметили приход сегодня. Сначала отметьте приход с помощью \'+\'',
+        'ℹ️ Пожалуйста, сначала отметьте свой приход на работу с помощью \'+\' или кнопки "✅ Пришёл". Спасибо!',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -456,20 +456,20 @@ function setupAttendanceHandlers(bot) {
 
       const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
       const trackingTime = trackingSeconds < 60
-        ? `${trackingSeconds} seconds`
-        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+        ? `${trackingSeconds} секунд`
+        : `${Math.round(trackingSeconds / 60)} минут`;
 
       await ctx.reply(
-        `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
-        `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
-        `⚠️ **IMPORTANT:**\n` +
-        `1️⃣ Tap "📎" (attach) button\n` +
-        `2️⃣ Select "Location"\n` +
-        `3️⃣ Choose "Share My Live Location"\n` +
-        `4️⃣ Set duration to 15 minutes or longer\n\n` +
-        `📍 Verification will take about ${trackingTime}.\n` +
-        `💬 Your message: "${departureMessage}"\n\n` +
-        `❌ Do NOT send "Current Location" - it will be rejected!`,
+        `📍 **ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ МЕСТОПОЛОЖЕНИЯ**\n\n` +
+        `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ ОНЛАЙН.\n\n` +
+        `⚠️ **ВАЖНО:**\n` +
+        `1️⃣ Нажмите кнопку "📎" (вложение)\n` +
+        `2️⃣ Выберите "Геолокация"\n` +
+        `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
+        `4️⃣ Установите время на 15 минут или больше\n\n` +
+        `📍 Проверка займет примерно ${trackingTime}.\n` +
+        `💬 Ваше сообщение: "${departureMessage}"\n\n` +
+        `❌ Пожалуйста, НЕ отправляйте "Текущее местоположение" - оно будет отклонено!`,
         { parse_mode: 'Markdown' }
       );
 
@@ -641,7 +641,7 @@ function setupAttendanceHandlers(bot) {
     // Check if marked as absent today
     if (status.isAbsent) {
       await ctx.reply(
-        '❌ Вы не пришли на работу сегодня. Отдыхайте! 😴',
+        'ℹ️ Вы отметили отсутствие на сегодня. Отдыхайте и набирайтесь сил! 😴 До встречи!',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -649,7 +649,7 @@ function setupAttendanceHandlers(bot) {
 
     if (!status.hasArrived) {
       await ctx.reply(
-        '❌ Вы не отметили приход сегодня. Сначала отметьте приход с помощью \'+\' или кнопкой \'✅ Пришёл\'',
+        'ℹ️ Пожалуйста, сначала отметьте свой приход на работу с помощью \'+\' или кнопки \'✅ Пришёл\'. Спасибо за понимание!',
         Keyboards.getMainMenu(ctx.from.id)
       );
       return;
@@ -659,15 +659,8 @@ function setupAttendanceHandlers(bot) {
     const now = moment.tz(Config.TIMEZONE);
     const workTime = CalculatorService.parseWorkTime(user.workTime);
 
-    // Check if after work end time
-    if (workTime && now.isAfter(workTime.end)) {
-      await ctx.reply(
-        `⚠️ Ваше рабочее время уже закончилось!\n\n` +
-        `🌙 Увидимся завтра! Хорошего вечера!`,
-        Keyboards.getMainMenu(ctx.from.id)
-      );
-      return;
-    }
+    // FIX: Allow departure even after work time ends (removed blocking check)
+    // Users should always be able to log their departure for proper tracking
 
     if (!workTime) {
       await ctx.reply(
@@ -772,15 +765,15 @@ function setupAttendanceHandlers(bot) {
         );
 
         await ctx.reply(
-          `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
-          `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
-          `⚠️ **IMPORTANT:**\n` +
-          `1️⃣ Tap "📎" (attach) button\n` +
-          `2️⃣ Select "Location"\n` +
-          `3️⃣ Choose "Share My Live Location"\n` +
-          `4️⃣ Set duration to 15 minutes or longer\n\n` +
-          `📍 Verification will take about ${trackingTime}.\n\n` +
-          `❌ Do NOT send "Current Location" - it will be rejected!`,
+          `📍 **ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ МЕСТОПОЛОЖЕНИЯ**\n\n` +
+          `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ ОНЛАЙН.\n\n` +
+          `⚠️ **ВАЖНО:**\n` +
+          `1️⃣ Нажмите кнопку "📎" (вложение)\n` +
+          `2️⃣ Выберите "Геолокация"\n` +
+          `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
+          `4️⃣ Установите время на 15 минут или больше\n\n` +
+          `📍 Проверка займет примерно ${trackingTime}.\n\n` +
+          `❌ Пожалуйста, НЕ отправляйте "Текущее местоположение" - оно будет отклонено!`,
           { parse_mode: 'Markdown' }
         );
 
@@ -862,15 +855,15 @@ function setupAttendanceHandlers(bot) {
           : `${Math.round(trackingSeconds / 60)} minute(s)`;
 
         await ctx.reply(
-          `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
-          `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
-          `⚠️ **IMPORTANT:**\n` +
-          `1️⃣ Tap "📎" (attach) button\n` +
-          `2️⃣ Select "Location"\n` +
-          `3️⃣ Choose "Share My Live Location"\n` +
-          `4️⃣ Set duration to 15 minutes or longer\n\n` +
-          `📍 Verification will take about ${trackingTime}.\n\n` +
-          `❌ Do NOT send "Current Location" - it will be rejected!`,
+          `📍 **ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ МЕСТОПОЛОЖЕНИЯ**\n\n` +
+          `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ ОНЛАЙН.\n\n` +
+          `⚠️ **ВАЖНО:**\n` +
+          `1️⃣ Нажмите кнопку "📎" (вложение)\n` +
+          `2️⃣ Выберите "Геолокация"\n` +
+          `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
+          `4️⃣ Установите время на 15 минут или больше\n\n` +
+          `📍 Проверка займет примерно ${trackingTime}.\n\n` +
+          `❌ Пожалуйста, НЕ отправляйте "Текущее местоположение" - оно будет отклонено!`,
           { parse_mode: 'Markdown' }
         );
 
@@ -1410,20 +1403,20 @@ function setupAttendanceHandlers(bot) {
 
         const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
         const trackingTime = trackingSeconds < 60
-          ? `${trackingSeconds} seconds`
-          : `${Math.round(trackingSeconds / 60)} minute(s)`;
+          ? `${trackingSeconds} секунд`
+          : `${Math.round(trackingSeconds / 60)} минут`;
 
         await ctx.reply(
-          `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
-          `Для подтверждения раннего ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ.\n\n` +
-          `⚠️ **IMPORTANT:**\n` +
-          `1️⃣ Tap "📎" (attach) button\n` +
-          `2️⃣ Select "Location"\n` +
-          `3️⃣ Choose "Share My Live Location"\n` +
-          `4️⃣ Set duration to 15 minutes or longer\n\n` +
-          `📍 Verification will take about ${trackingTime}.\n` +
-          `💬 Reason: "${reason}"\n\n` +
-          `❌ Do NOT send "Current Location" - it will be rejected!`,
+          `📍 **ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ МЕСТОПОЛОЖЕНИЯ**\n\n` +
+          `Для подтверждения раннего ухода, пожалуйста, будьте добры, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ ОНЛАЙН.\n\n` +
+          `⚠️ **ВАЖНО:**\n` +
+          `1️⃣ Нажмите кнопку "📎" (вложение)\n` +
+          `2️⃣ Выберите "Геолокация"\n` +
+          `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
+          `4️⃣ Установите время на 15 минут или больше\n\n` +
+          `📍 Проверка займет примерно ${trackingTime}.\n` +
+          `💬 Причина: "${reason}"\n\n` +
+          `❌ Пожалуйста, НЕ отправляйте "Текущее местоположение" - оно будет отклонено!`,
           { parse_mode: 'Markdown' }
         );
 
@@ -1665,8 +1658,8 @@ function setupAttendanceHandlers(bot) {
 
       const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
       const trackingTime = trackingSeconds < 60
-        ? `${trackingSeconds} seconds`
-        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+        ? `${trackingSeconds} секунд`
+        : `${Math.round(trackingSeconds / 60)} минут`;
 
       await ctx.editMessageText(
         `✅ Причина: ${reasonText}\n\n` +
@@ -1674,16 +1667,16 @@ function setupAttendanceHandlers(bot) {
       );
 
       await ctx.reply(
-        `📍 **LOCATION VERIFICATION REQUIRED**\n\n` +
-        `To confirm your early departure, please share your LIVE location.\n\n` +
-        `⚠️ **IMPORTANT:**\n` +
-        `1️⃣ Tap "📎" (attach) button\n` +
-        `2️⃣ Select "Location"\n` +
-        `3️⃣ Choose "Share My Live Location"\n` +
-        `4️⃣ Set duration to 15 minutes or longer\n\n` +
-        `📍 Verification will take about ${trackingTime}.\n` +
-        `💬 Reason: "${reasonText}"\n\n` +
-        `❌ Do NOT send "Current Location" - it will be rejected!`,
+        `📍 **ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ МЕСТОПОЛОЖЕНИЯ**\n\n` +
+        `Для подтверждения раннего ухода, пожалуйста, поделитесь ВАШИМ МЕСТОПОЛОЖЕНИЕМ ОНЛАЙН.\n\n` +
+        `⚠️ **ВАЖНО:**\n` +
+        `1️⃣ Нажмите кнопку "📎" (вложение)\n` +
+        `2️⃣ Выберите "Геолокация"\n` +
+        `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
+        `4️⃣ Установите время на 15 минут или больше\n\n` +
+        `📍 Проверка займет примерно ${trackingTime}.\n` +
+        `💬 Причина: "${reasonText}"\n\n` +
+        `❌ Пожалуйста, НЕ отправляйте "Текущее местоположение" - оно будет отклонено!`,
         { parse_mode: 'Markdown' }
       );
 
@@ -3832,14 +3825,14 @@ function setupAttendanceHandlers(bot) {
         awaitingLocationForCheckout.delete(userId);
 
         await ctx.reply(
-          `❌ **REJECTED: This is NOT live location data**\n\n` +
-          `⚠️ I only accept LIVE LOCATION, not static location.\n\n` +
-          `Please try again:\n` +
-          `1️⃣ Press "🚪 Ухожу" button\n` +
-          `2️⃣ Tap "📍 Share Location"\n` +
-          `3️⃣ Select "Share My Live Location"\n` +
-          `4️⃣ Choose 15 minutes or longer\n\n` +
-          `Do NOT select "Send My Current Location" - that won't work!`,
+          `❌ **К СОЖАЛЕНИЮ, ЭТО НЕ ОНЛАЙН МЕСТОПОЛОЖЕНИЕ**\n\n` +
+          `⚠️ Пожалуйста, отправьте местоположение ОНЛАЙН, а не статическое.\n\n` +
+          `Попробуйте ещё раз:\n` +
+          `1️⃣ Нажмите кнопку "🚪 Ухожу"\n` +
+          `2️⃣ Нажмите "📎" (вложение)\n` +
+          `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
+          `4️⃣ Установите время на 15 минут или больше\n\n` +
+          `Пожалуйста, НЕ выбирайте "Отправить мое текущее местоположение" - это не будет работать!`,
           Keyboards.getMainMenu(ctx.from.id)
         );
 
@@ -3852,8 +3845,8 @@ function setupAttendanceHandlers(bot) {
 
       const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
       const trackingTime = trackingSeconds < 60
-        ? `${trackingSeconds} seconds`
-        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+        ? `${trackingSeconds} секунд`
+        : `${Math.round(trackingSeconds / 60)} минут`;
 
       await ctx.reply(
         `✅ Live location received!\n\n` +
@@ -3924,14 +3917,14 @@ function setupAttendanceHandlers(bot) {
         awaitingLocationForCheckIn.delete(userId);
 
         await ctx.reply(
-          `❌ **REJECTED: This is NOT live location data**\n\n` +
-          `⚠️ I only accept LIVE LOCATION, not static location.\n\n` +
-          `Please try again:\n` +
-          `1️⃣ Press "✅ Пришёл" button\n` +
-          `2️⃣ Tap "📍 Share Location"\n` +
-          `3️⃣ Select "Share My Live Location"\n` +
-          `4️⃣ Choose 15 minutes or longer\n\n` +
-          `Do NOT select "Send My Current Location" - that won't work!`,
+          `❌ **К СОЖАЛЕНИЮ, ЭТО НЕ ОНЛАЙН МЕСТОПОЛОЖЕНИЕ**\n\n` +
+          `⚠️ Пожалуйста, отправьте местоположение ОНЛАЙН, а не статическое.\n\n` +
+          `Попробуйте ещё раз:\n` +
+          `1️⃣ Нажмите кнопку "✅ Пришёл"\n` +
+          `2️⃣ Нажмите "📎" (вложение)\n` +
+          `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
+          `4️⃣ Установите время на 15 минут или больше\n\n` +
+          `Пожалуйста, НЕ выбирайте "Отправить мое текущее местоположение" - это не будет работать!`,
           Keyboards.getMainMenu(ctx.from.id)
         );
 
@@ -3944,14 +3937,14 @@ function setupAttendanceHandlers(bot) {
 
       const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
       const trackingTime = trackingSeconds < 60
-        ? `${trackingSeconds} seconds`
-        : `${Math.round(trackingSeconds / 60)} minute(s)`;
+        ? `${trackingSeconds} секунд`
+        : `${Math.round(trackingSeconds / 60)} минут`;
 
       await ctx.reply(
-        `✅ Live location received!\n\n` +
-        `📍 Verification in progress...\n` +
-        `This will take about ${trackingTime}.\n\n` +
-        `You can use other apps if needed. Processing check-in...`
+        `✅ Онлайн местоположение получено!\n\n` +
+        `📍 Идет проверка...\n` +
+        `Это займет примерно ${trackingTime}.\n\n` +
+        `Вы можете пользоваться другими приложениями. Обрабатываем ваш приход...`
       );
 
       // Clean up the awaiting state
