@@ -657,7 +657,7 @@ class SchedulerService {
       }
 
       // FIX #1: Clean up old cached end times (keep only today's entries)
-      const today = now.format('YYYY-MM-DD');
+      // Note: 'today' is already declared at the top of this function
       for (const [key, value] of this._lastAdjustedEndTimes.entries()) {
         if (value.date !== today) {
           this._lastAdjustedEndTimes.delete(key);
