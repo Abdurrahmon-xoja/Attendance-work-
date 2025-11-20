@@ -86,7 +86,7 @@ class Keyboards {
       ['4', '5', '6'],
       ['7', '8', '9'],
       ['0', '⬅️ Удалить', '✅ Готово']
-    ]).resize().inputFieldPlaceholder(placeholder);
+    ], { input_field_placeholder: placeholder }).resize();
   }
 
   /**
@@ -235,7 +235,7 @@ class Keyboards {
    * @returns {Object} Force reply markup
    */
   static getTextInput(placeholder = 'Введите текст...') {
-    return Markup.forceReply().inputFieldPlaceholder(placeholder);
+    return Markup.forceReply({ input_field_placeholder: placeholder });
   }
 
   /**
