@@ -122,23 +122,23 @@ const handleLocationUpdate = async (ctx) => {
           );
 
           // Send alert to user
-          const alertMessage = `🚨 CHECK-IN REJECTED - FRAUD DETECTED\n\n` +
+          const alertMessage = `🚨 ОТМЕТКА ПРИХОДА ОТКЛОНЕНА - ОБНАРУЖЕНО НАРУШЕНИЕ\n\n` +
             anomalyDetectorService.formatAnomalyMessage(analysis) +
-            `\n\n⛔ Your arrival has been CANCELLED and marked as ABSENT.\n` +
-            `Penalty: -2.0 points\n\n` +
-            `Contact your manager immediately.`;
+            `\n\n⛔ Ваша отметка прихода была ОТМЕНЕНА, и Вы отмечены как ОТСУТСТВУЮЩИЙ.\n` +
+            `Штраф: -2.0 балла\n\n` +
+            `Пожалуйста, срочно обратитесь к руководителю.`;
           await ctx.reply(alertMessage);
 
           // Notify admins
           if (Config.ADMIN_TELEGRAM_IDS && Config.ADMIN_TELEGRAM_IDS.length > 0) {
-            const adminMessage = `🚨 FRAUD ALERT - CHECK-IN CANCELLED\n\n` +
-              `Employee: ${userName}\n` +
+            const adminMessage = `🚨 ПРЕДУПРЕЖДЕНИЕ О НАРУШЕНИИ - ОТМЕТКА ПРИХОДА ОТМЕНЕНА\n\n` +
+              `Сотрудник: ${userName}\n` +
               `User ID: ${userId}\n` +
-              `Anomalies: ${analysis.anomalyCount}\n` +
-              `Severity: ${analysis.severity}\n\n` +
+              `Аномалии: ${analysis.anomalyCount}\n` +
+              `Серьезность: ${analysis.severity}\n\n` +
               `${analysis.summary}\n\n` +
-              `⚠️ Arrival has been REMOVED from attendance sheet.\n` +
-              `Marked as ABSENT with FRAUD ATTEMPT.`;
+              `⚠️ Приход УДАЛЕН из листа посещаемости.\n` +
+              `Отмечен как ОТСУТСТВУЮЩИЙ с попыткой нарушения.`;
 
             for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
               try {
@@ -176,9 +176,9 @@ const handleLocationUpdate = async (ctx) => {
         if (!analysis.hasAnomaly) {
           // Successful verification
           await ctx.reply(
-            `✅ **Location verification complete!**\n\n` +
-            `Your location has been successfully verified.\n` +
-            `No anomalies detected. Thank you! 🎉`,
+            `✅ **Проверка местоположения завершена!**\n\n` +
+            `Ваше местоположение успешно подтверждено.\n` +
+            `Аномалий не обнаружено. Спасибо! 🎉`,
             { parse_mode: 'Markdown' }
           );
         }
@@ -200,23 +200,23 @@ const handleLocationUpdate = async (ctx) => {
             );
 
             // Send fraud alert to user
-            const alertMessage = `🚨 CHECK-IN REJECTED - FRAUD DETECTED\n\n` +
+            const alertMessage = `🚨 ОТМЕТКА ПРИХОДА ОТКЛОНЕНА - ОБНАРУЖЕНО НАРУШЕНИЕ\n\n` +
               anomalyDetectorService.formatAnomalyMessage(analysis) +
-              `\n\n⛔ Your arrival has been CANCELLED and marked as ABSENT.\n` +
-              `Penalty: -2.0 points\n\n` +
-              `Contact your manager immediately.`;
+              `\n\n⛔ Ваша отметка прихода была ОТМЕНЕНА, и Вы отмечены как ОТСУТСТВУЮЩИЙ.\n` +
+              `Штраф: -2.0 балла\n\n` +
+              `Пожалуйста, срочно обратитесь к руководителю.`;
             await ctx.reply(alertMessage);
 
             // Notify admins about fraud
             if (Config.ADMIN_TELEGRAM_IDS && Config.ADMIN_TELEGRAM_IDS.length > 0) {
-              const adminMessage = `🚨 FRAUD ALERT - CHECK-IN CANCELLED\n\n` +
-                `Employee: ${userName}\n` +
+              const adminMessage = `🚨 ПРЕДУПРЕЖДЕНИЕ О НАРУШЕНИИ - ОТМЕТКА ПРИХОДА ОТМЕНЕНА\n\n` +
+                `Сотрудник: ${userName}\n` +
                 `User ID: ${userId}\n` +
-                `Anomalies: ${analysis.anomalyCount}\n` +
-                `Severity: ${analysis.severity}\n\n` +
+                `Аномалии: ${analysis.anomalyCount}\n` +
+                `Серьезность: ${analysis.severity}\n\n` +
                 `${analysis.summary}\n\n` +
-                `⚠️ Arrival has been REMOVED from attendance sheet.\n` +
-                `Marked as ABSENT with FRAUD ATTEMPT.`;
+                `⚠️ Приход УДАЛЕН из листа посещаемости.\n` +
+                `Отмечен как ОТСУТСТВУЮЩИЙ с попыткой нарушения.`;
 
               for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
                 try {
@@ -236,11 +236,11 @@ const handleLocationUpdate = async (ctx) => {
 
             // Notify admins
             if (Config.ADMIN_TELEGRAM_IDS && Config.ADMIN_TELEGRAM_IDS.length > 0) {
-              const adminMessage = `⚠️ Location Verification Issue\n\n` +
-                `Employee: ${userName}\n` +
+              const adminMessage = `⚠️ Проблема с проверкой местоположения\n\n` +
+                `Сотрудник: ${userName}\n` +
                 `User ID: ${userId}\n` +
-                `Anomalies: ${analysis.anomalyCount}\n` +
-                `Severity: ${analysis.severity}\n\n` +
+                `Аномалии: ${analysis.anomalyCount}\n` +
+                `Серьезность: ${analysis.severity}\n\n` +
                 `${analysis.summary}`;
 
               for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
@@ -302,7 +302,7 @@ if (Config.ENABLE_LOCATION_TRACKING) {
             // Notify user of success
             bot.telegram.sendMessage(
               parseInt(stopped.userId),
-              `✅ Location verification complete!\n\nReceived ${stopped.updateCount} location updates. Verification successful! 🎉`
+              `✅ Проверка местоположения завершена!\n\nПолучено ${stopped.updateCount} обновлений местоположения. Проверка прошла успешно! 🎉`
             ).catch(err => {
               logger.error(`Failed to notify user ${stopped.userId}: ${err.message}`);
             });
@@ -321,7 +321,7 @@ if (Config.ENABLE_LOCATION_TRACKING) {
             // Notify user
             bot.telegram.sendMessage(
               parseInt(stopped.userId),
-              `⚠️ Location tracking stopped too early.\n\nOnly received ${stopped.updateCount} updates (minimum: ${Config.MIN_UPDATES_FOR_VERIFICATION}).\n\nPlease keep Telegram open during check-in.`
+              `⚠️ Отслеживание местоположения остановлено слишком рано.\n\nПолучено только ${stopped.updateCount} обновлений (минимум: ${Config.MIN_UPDATES_FOR_VERIFICATION}).\n\nПожалуйста, держите Telegram открытым во время отметки прихода.`
             ).catch(err => {
               logger.error(`Failed to notify user ${stopped.userId}: ${err.message}`);
             });

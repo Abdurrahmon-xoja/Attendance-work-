@@ -262,6 +262,7 @@ class SheetsService {
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         if (row.get('Telegram Id')?.toString().trim() === telegramId.toString()) {
+          const doNotWorkSaturday = (row.get('Do not work in Saturday') || '').toString().toLowerCase().trim();
           return {
             rowNumber: i + 2, // +2 because header is row 1, and index starts at 0
             nameFull: row.get('Name full') || '',
@@ -270,6 +271,7 @@ class SheetsService {
             company: row.get('Company') || '',
             telegramUsername: row.get('Telegram user name') || '',
             telegramId: row.get('Telegram Id') || '',
+            doNotWorkSaturday: doNotWorkSaturday === 'yes',
             _row: row
           };
         }
@@ -303,6 +305,7 @@ class SheetsService {
         const row = rows[i];
         const sheetUsername = (row.get('Telegram user name') || '').trim();
         if (sheetUsername.toLowerCase() === username.toLowerCase()) {
+          const doNotWorkSaturday = (row.get('Do not work in Saturday') || '').toString().toLowerCase().trim();
           return {
             rowNumber: i + 2,
             nameFull: row.get('Name full') || '',
@@ -311,6 +314,7 @@ class SheetsService {
             company: row.get('Company') || '',
             telegramUsername: row.get('Telegram user name') || '',
             telegramId: row.get('Telegram Id') || '',
+            doNotWorkSaturday: doNotWorkSaturday === 'yes',
             _row: row
           };
         }

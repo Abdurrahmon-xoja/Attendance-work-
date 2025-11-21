@@ -110,6 +110,11 @@ async function processArrivalWithLocation(ctx, user, location) {
     // Check if arrived today
     const status = await sheetsService.getUserStatusToday(user.telegramId);
 
+    // Check if Sunday OR (Saturday AND user doesn't work on Saturday) - encourage work
+    const isSunday = now.day() === 0;
+    const isSaturday = now.day() === 6;
+    const isDayOff = isSunday || (isSaturday && user.doNotWorkSaturday);
+
     // Calculate lateness
     const { latenessMinutes, status: latenessStatus } = CalculatorService.calculateLateness(
       workTime.start,
@@ -121,7 +126,13 @@ async function processArrivalWithLocation(ctx, user, location) {
     let details = 'on_time';
     let ratingImpact = 0.0;
 
-    if (latenessStatus === 'ON_TIME') {
+    if (isDayOff) {
+      const dayName = isSunday ? 'воскресенье' : 'субботу';
+      responseText += `🌟 Отличная работа! Вы работаете в ${dayName}!\n`;
+      responseText += `💪 Такое усердие заслуживает уважения!\n`;
+      details = isSunday ? 'sunday_work' : 'saturday_work';
+      ratingImpact = 1.0; // Bonus point for working on day off
+    } else if (latenessStatus === 'ON_TIME') {
       responseText += `🎉 Вы пришли вовремя!`;
       details = 'on_time';
     } else if (latenessStatus === 'LATE' || latenessStatus === 'SOFT_LATE') {
@@ -314,6 +325,11 @@ function setupAttendanceHandlers(bot) {
     // === FALLBACK: LOCATION TRACKING DISABLED ===
     // Continue with normal check-in (without location)
 
+    // Check if Sunday OR (Saturday AND user doesn't work on Saturday) - encourage work
+    const isSunday = now.day() === 0;
+    const isSaturday = now.day() === 6;
+    const isDayOff = isSunday || (isSaturday && user.doNotWorkSaturday);
+
     // Calculate lateness
     const { latenessMinutes, status: latenessStatus } = CalculatorService.calculateLateness(
       workTime.start,
@@ -325,7 +341,13 @@ function setupAttendanceHandlers(bot) {
     let details = 'on_time';
     let ratingImpact = 0.0;
 
-    if (latenessStatus === 'ON_TIME') {
+    if (isDayOff) {
+      const dayName = isSunday ? 'воскресенье' : 'субботу';
+      responseText += `🌟 Отличная работа! Вы работаете в ${dayName}!\n`;
+      responseText += `💪 Такое усердие заслуживает уважения!`;
+      details = isSunday ? 'sunday_work' : 'saturday_work';
+      ratingImpact = 1.0; // Bonus point for working on day off
+    } else if (latenessStatus === 'ON_TIME') {
       responseText += `🎉 Вы пришли вовремя!`;
       details = 'on_time';
     } else if (latenessStatus === 'LATE' || latenessStatus === 'SOFT_LATE') {
@@ -757,8 +779,8 @@ function setupAttendanceHandlers(bot) {
 
         await ctx.reply(
           `✅ Вы отработали требуемое количество часов!\n\n` +
-          `Требуется: ${requiredWorkHours} часа\n` +
-          `Вы отработали: ${actualWorkedHours} часа\n\n` +
+          `Требуется: ${CalculatorService.formatTimeDiff(requiredWorkMinutes)}\n` +
+          `Вы отработали: ${CalculatorService.formatTimeDiff(actualWorkedMinutes)}\n\n` +
           `⚠️ Но вы уходите раньше официального времени окончания работы (${requiredEndTime.format('HH:mm')}).\n\n` +
           `📍 Пожалуйста, подтвердите ваше местоположение для завершения.`,
           Keyboards.getMainMenu(ctx.from.id)
@@ -810,8 +832,8 @@ function setupAttendanceHandlers(bot) {
 
       await ctx.reply(
         `✅ Вы отработали требуемое количество часов!\n\n` +
-        `Требуется: ${requiredWorkHours} часа\n` +
-        `Вы отработали: ${actualWorkedHours} часа\n\n` +
+        `Требуется: ${CalculatorService.formatTimeDiff(requiredWorkMinutes)}\n` +
+        `Вы отработали: ${CalculatorService.formatTimeDiff(actualWorkedMinutes)}\n\n` +
         `⚠️ Но вы уходите раньше официального времени окончания работы (${requiredEndTime.format('HH:mm')}).\n` +
         `Это будет зафиксировано в системе.\n\n` +
         `👋 Хорошего отдыха!\n\n` +
@@ -823,13 +845,12 @@ function setupAttendanceHandlers(bot) {
     } else if (!workedFullHours && isLeavingEarly) {
       // Did NOT work full hours and leaving early - ask for reason
       const remainingMinutes = requiredWorkMinutes - actualWorkedMinutes;
-      const remainingHours = (remainingMinutes / 60).toFixed(2);
 
       await ctx.reply(
         `⚠️ Вы не отработали требуемое количество часов!\n\n` +
-        `Требуется: ${requiredWorkHours} часа\n` +
-        `Вы отработали: ${actualWorkedHours} часа\n` +
-        `Осталось: ${remainingHours} часа\n\n` +
+        `Требуется: ${CalculatorService.formatTimeDiff(requiredWorkMinutes)}\n` +
+        `Вы отработали: ${CalculatorService.formatTimeDiff(actualWorkedMinutes)}\n` +
+        `Осталось: ${CalculatorService.formatTimeDiff(remainingMinutes)}\n\n` +
         `📝 Пожалуйста, укажите причину раннего ухода:`,
         Keyboards.getEarlyDepartureReasonKeyboard()
       );
@@ -914,8 +935,23 @@ function setupAttendanceHandlers(bot) {
     const user = await getUserOrPromptRegistration(ctx);
     if (!user) return;
 
-    // Check if after work end time
+    // Check if Sunday OR (Saturday AND user doesn't work on Saturday) - encourage rest
     const now = moment.tz(Config.TIMEZONE);
+    const isSunday = now.day() === 0;
+    const isSaturday = now.day() === 6;
+    const isDayOff = isSunday || (isSaturday && user.doNotWorkSaturday);
+
+    if (isDayOff) {
+      const dayName = isSunday ? 'воскресенье' : 'суббота';
+      await ctx.reply(
+        `🌞 Сегодня ${dayName}, отдыхайте!\n\n` +
+        'Не нужно отмечать опоздания в выходной день.\n' +
+        'Хорошего отдыха! 😊',
+        Keyboards.getMainMenu(ctx.from.id)
+      );
+      return;
+    }
+
     const workTime = CalculatorService.parseWorkTime(user.workTime);
 
     if (!workTime) {
@@ -926,14 +962,8 @@ function setupAttendanceHandlers(bot) {
       return;
     }
 
-    if (now.isAfter(workTime.end)) {
-      await ctx.reply(
-        `⚠️ Ваше рабочее время уже закончилось!\n\n` +
-        `🌙 Увидимся завтра! Хорошего вечера!`,
-        Keyboards.getMainMenu(ctx.from.id)
-      );
-      return;
-    }
+    // Removed: Allow late notification even after work hours
+    // Users might need to report late arrival retrospectively
 
     // Check if already arrived today
     const status = await sheetsService.getUserStatusToday(user.telegramId);
@@ -1475,8 +1505,23 @@ function setupAttendanceHandlers(bot) {
     const user = await getUserOrPromptRegistration(ctx);
     if (!user) return;
 
-    // Check if after work end time
+    // Check if Sunday OR (Saturday AND user doesn't work on Saturday) - encourage rest
     const now = moment.tz(Config.TIMEZONE);
+    const isSunday = now.day() === 0;
+    const isSaturday = now.day() === 6;
+    const isDayOff = isSunday || (isSaturday && user.doNotWorkSaturday);
+
+    if (isDayOff) {
+      const dayName = isSunday ? 'воскресенье' : 'суббота';
+      await ctx.reply(
+        `🌞 Сегодня ${dayName}, отдыхайте!\n\n` +
+        'Не нужно отмечать отсутствие в выходной день.\n' +
+        'Хорошего отдыха! 😊',
+        Keyboards.getMainMenu(ctx.from.id)
+      );
+      return;
+    }
+
     const workTime = CalculatorService.parseWorkTime(user.workTime);
 
     if (!workTime) {
@@ -1487,14 +1532,8 @@ function setupAttendanceHandlers(bot) {
       return;
     }
 
-    if (now.isAfter(workTime.end)) {
-      await ctx.reply(
-        `⚠️ Ваше рабочее время уже закончилось!\n\n` +
-        `🌙 Увидимся завтра! Хорошего вечера!`,
-        Keyboards.getMainMenu(ctx.from.id)
-      );
-      return;
-    }
+    // Removed: Allow absence marking even after work hours
+    // Users might need to mark absence retrospectively
 
     // Check if already arrived today
     const status = await sheetsService.getUserStatusToday(user.telegramId);
@@ -1561,7 +1600,8 @@ function setupAttendanceHandlers(bot) {
     }
 
     if (reasonCode === 'other') {
-      await ctx.editMessageText('📝 Напишите причину отсутствия:', Keyboards.getTextInput('Болею / Личные дела...'));
+      await ctx.editMessageText('📝 Напишите причину отсутствия:');
+      await ctx.reply('📝 Пожалуйста, укажите причину:', Keyboards.getTextInput('Болею / Личные дела...'));
       ctx.session = ctx.session || {};
       ctx.session.awaitingAbsentReason = true;
       return;
@@ -1623,7 +1663,8 @@ function setupAttendanceHandlers(bot) {
     }
 
     if (reasonCode === 'other') {
-      await ctx.editMessageText('📝 Напишите причину раннего ухода:', Keyboards.getTextInput('Семья / Здоровье...'));
+      await ctx.editMessageText('📝 Напишите причину раннего ухода:');
+      await ctx.reply('📝 Пожалуйста, укажите причину:', Keyboards.getTextInput('Семья / Здоровье...'));
       ctx.session = ctx.session || {};
       ctx.session.awaitingEarlyDepartureReason = true;
       return;
@@ -1742,14 +1783,8 @@ function setupAttendanceHandlers(bot) {
       return;
     }
 
-    if (now.isAfter(workTime.end)) {
-      await ctx.reply(
-        `⚠️ Ваше рабочее время уже закончилось!\n\n` +
-        `🌙 Увидимся завтра! Хорошего вечера!`,
-        Keyboards.getMainMenu(ctx.from.id)
-      );
-      return;
-    }
+    // Removed: Allow working longer even after official end time
+    // Users might stay late and need to log extra hours
 
     // Check if marked as absent today
     const status = await sheetsService.getUserStatusToday(user.telegramId);
@@ -3206,7 +3241,8 @@ function setupAttendanceHandlers(bot) {
 
     if (reason === 'other') {
       await ctx.answerCbQuery();
-      await ctx.editMessageText('📝 Введите свою причину:', Keyboards.getTextInput('Обед / Врач...'));
+      await ctx.editMessageText('📝 Введите свою причину:');
+      await ctx.reply('📝 Пожалуйста, укажите причину:', Keyboards.getTextInput('Обед / Врач...'));
       ctx.session.awaitingTempExitCustomReason = true;
     } else {
       await ctx.answerCbQuery();
@@ -3723,36 +3759,35 @@ function setupAttendanceHandlers(bot) {
 
       // Calculate worked hours
       const workedMinutes = checkoutTime.diff(moment.tz(arrivalTime, 'HH:mm', Config.TIMEZONE), 'minutes');
-      const workedHours = (workedMinutes / 60).toFixed(2);
 
       // Check if leaving early
       const scheduledEnd = workTime.end;
       const isEarly = checkoutTime.isBefore(scheduledEnd);
       const earlyMinutes = isEarly ? scheduledEnd.diff(checkoutTime, 'minutes') : 0;
 
-      let responseText = `✅ **Checkout recorded!**\n\n`;
+      let responseText = `✅ **Уход отмечен!**\n\n`;
       let eventType = 'DEPARTURE';
       let details = departureMessage ? `message: ${departureMessage}` : 'normal';
       let ratingImpact = 0.0;
 
       if (isEarly) {
-        responseText += `⚠️ Early departure: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
+        responseText += `⚠️ Ранний уход: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
         details = `early_${earlyMinutes}min` + (departureMessage ? `, msg: ${departureMessage}` : '');
 
         // Check if message was provided
         if (Config.REQUIRE_DEPARTURE_MESSAGE && !departureMessage) {
           ratingImpact = CalculatorService.calculateRatingImpact('LEFT_WITHOUT_MESSAGE');
-          responseText += `⚠️ Left early without message: ${ratingImpact} points\n`;
+          responseText += `⚠️ Ушли рано без сообщения: ${ratingImpact} баллов\n`;
         } else if (departureMessage) {
           ratingImpact = CalculatorService.calculateRatingImpact('EARLY_DEPARTURE');
-          responseText += `📝 Message provided: ${departureMessage}\n`;
+          responseText += `📝 Указана причина: ${departureMessage}\n`;
         }
       } else {
-        responseText += `✅ Left on time or later\n`;
+        responseText += `✅ Ушли вовремя или позже\n`;
       }
 
-      responseText += `\n⏱️ Worked: ${workedHours} hours\n`;
-      responseText += `📍 Location verified`;
+      responseText += `\n⏱️ Отработано: ${CalculatorService.formatTimeDiff(workedMinutes)}\n`;
+      responseText += `📍 Местоположение подтверждено`;
 
       // Log departure event
       await sheetsService.logEvent(
@@ -3780,8 +3815,8 @@ function setupAttendanceHandlers(bot) {
         pointEmoji = '🟡';
       }
 
-      responseText += `\n\n📊 Points today: ${todayPoint} ${pointEmoji}`;
-      responseText += `\n\n👋 Have a great evening!`;
+      responseText += `\n\n📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`;
+      responseText += `\n\n👋 Хорошего вечера!`;
 
       await ctx.reply(responseText, {
         ...Keyboards.getMainMenu(ctx.from.id),
@@ -3793,7 +3828,7 @@ function setupAttendanceHandlers(bot) {
     } catch (error) {
       logger.error(`Error processing departure with location: ${error.message}`);
       await ctx.reply(
-        '❌ Error recording checkout. Please try again or contact administrator.',
+        '❌ Ошибка при регистрации ухода. Пожалуйста, попробуйте снова или обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
     }
@@ -3849,10 +3884,10 @@ function setupAttendanceHandlers(bot) {
         : `${Math.round(trackingSeconds / 60)} минут`;
 
       await ctx.reply(
-        `✅ Live location received!\n\n` +
-        `📍 Verification in progress...\n` +
-        `This will take about ${trackingTime}.\n\n` +
-        `You can use other apps if needed. Processing checkout...`
+        `✅ Получено живое местоположение!\n\n` +
+        `📍 Проверка в процессе...\n` +
+        `Это займет около ${trackingTime}.\n\n` +
+        `Вы можете использовать другие приложения при необходимости. Обрабатываем отметку ухода...`
       );
 
       // Clean up the awaiting state
@@ -3864,7 +3899,7 @@ function setupAttendanceHandlers(bot) {
     } catch (error) {
       logger.error(`Error in checkout location handler: ${error.message}`);
       await ctx.reply(
-        '❌ Error processing your location. Please try again or contact administrator.',
+        '❌ Ошибка при обработке Вашего местоположения. Пожалуйста, попробуйте снова или обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
     }
@@ -3956,7 +3991,7 @@ function setupAttendanceHandlers(bot) {
     } catch (error) {
       logger.error(`Error in check-in location handler: ${error.message}`);
       await ctx.reply(
-        '❌ Error processing your location. Please try again or contact administrator.',
+        '❌ Ошибка при обработке Вашего местоположения. Пожалуйста, попробуйте снова или обратитесь к администратору.',
         Keyboards.getMainMenu(ctx.from.id)
       );
     }
@@ -4484,102 +4519,61 @@ async function handleStatus(ctx) {
   const now = moment.tz(Config.TIMEZONE);
 
   let response = `📊 ВАШ СТАТУС\n\n`;
-  response += `👤 Имя: ${user.nameFull}\n`;
-  response += `🏢 Компания: ${user.company}\n`;
-  response += `⏰ График: ${user.workTime}\n\n`;
 
-  response += `📅 СЕГОДНЯ (${now.format('DD.MM.YYYY')}):\n`;
+  response += `⏰ График работы: ${user.workTime}\n\n`;
 
   // Check if user is absent today
   if (status.isAbsent) {
-    response += `🏠 Вы отметили отсутствие сегодня\n`;
-    response += `✅ Не волнуйтесь, ваше отсутствие зафиксировано!\n`;
-    response += `💤 Отдыхайте или выздоравливайте!\n`;
+    response += `🏠 Сегодня (${now.format('DD.MM.YYYY')}):\n`;
+    response += `Вы отметили отсутствие\n\n`;
+    response += `📊 Баллы сегодня: ${todayPoint} ${pointEmoji}\n`;
   } else {
-    // Normal status display
-    if (status.hasArrived) {
-      response += `✅ Приход: ${status.arrivalTime}\n`;
-    } else {
-      response += `❌ Приход: не отмечен\n`;
+    // Parse work schedule to calculate required hours
+    const workTime = CalculatorService.parseWorkTime(user.workTime);
+    let requiredMinutes = 0;
+    let workedMinutes = 0;
+
+    if (workTime) {
+      requiredMinutes = workTime.end.diff(workTime.start, 'minutes');
     }
 
-    if (status.hasDeparted) {
-      response += `✅ Уход: ${status.departureTime}\n`;
-      if (status.departureMessage) {
-        response += `💬 Сообщение: "${status.departureMessage}"\n`;
+    // Calculate worked minutes if arrived
+    if (status.hasArrived && status.arrivalTime) {
+      const arrivalMoment = moment.tz(status.arrivalTime, 'HH:mm:ss', Config.TIMEZONE);
+      if (status.hasDeparted && status.departureTime) {
+        const departureMoment = moment.tz(status.departureTime, 'HH:mm:ss', Config.TIMEZONE);
+        workedMinutes = departureMoment.diff(arrivalMoment, 'minutes');
+      } else {
+        // Still working - calculate current worked time
+        workedMinutes = now.diff(arrivalMoment, 'minutes');
       }
-    } else {
-      response += `❌ Уход: не отмечен\n`;
     }
 
-    if (status.violations.length > 0) {
-      response += `\n⚠️ Нарушения сегодня:\n`;
-      for (const v of status.violations) {
-        response += `  • ${v.type}: ${v.details}\n`;
-      }
-    }
+    response += `📅 Сегодня (${now.format('DD.MM.YYYY')}):\n`;
+    response += `Отработано: ${CalculatorService.formatTimeDiff(workedMinutes)} / ${CalculatorService.formatTimeDiff(requiredMinutes)}\n\n`;
+    response += `📊 Баллы сегодня: ${todayPoint} ${pointEmoji}\n`;
   }
 
-  response += `\n📊 ВАШ БАЛЛ СЕГОДНЯ:\n`;
-  response += `Баллы: ${todayPoint} ${pointEmoji}\n`;
-  response += `Статус: ${pointMessage}`;
-
-  // Add comprehensive monthly statistics from monthly report
+  // Add monthly work hours summary
   const monthlyStats = await sheetsService.getMonthlyStats(user.telegramId);
 
   if (monthlyStats) {
-    const currentMonth = now.format('MMMM YYYY', 'ru');
-    response += `\n\n📊 СТАТИСТИКА ЗА МЕСЯЦ (${now.format('MMMM YYYY').toUpperCase()}):\n\n`;
-
-    // Attendance summary
-    response += `📅 Посещаемость:\n`;
-    response += `  • Отработано дней: ${monthlyStats.daysWorked}/${monthlyStats.totalWorkDays}\n`;
-    response += `  • Процент присутствия: ${monthlyStats.attendanceRate.toFixed(1)}%\n`;
-    response += `  • Пропущено: ${monthlyStats.daysAbsent} дней\n`;
-
-    // Punctuality
-    response += `\n⏰ Пунктуальность:\n`;
-    response += `  • Вовремя: ${monthlyStats.onTimeArrivals} раз\n`;
-    response += `  • Опоздания (предупр.): ${monthlyStats.lateArrivalsNotified}\n`;
-    response += `  • Опоздания (без предупр.): ${monthlyStats.lateArrivalsSilent}\n`;
-    response += `  • Процент вовремя: ${monthlyStats.onTimeRate.toFixed(1)}%\n`;
-
-    // Work hours
-    response += `\n⏱ Рабочие часы:\n`;
-    response += `  • Отработано: ${monthlyStats.totalHoursWorked.toFixed(1)} ч\n`;
-    response += `  • Требуется: ${monthlyStats.totalHoursRequired.toFixed(1)} ч\n`;
-
-    // Balance with status emoji
-    response += `\n💰 Баланс времени:\n`;
-    response += `  • Переработка: ${CalculatorService.formatTimeDiff(monthlyStats.totalSurplusMinutes)}\n`;
-    response += `  • Недоработка: ${CalculatorService.formatTimeDiff(monthlyStats.totalDeficitMinutes)}\n`;
-    response += `  • Штрафы: ${CalculatorService.formatTimeDiff(monthlyStats.totalPenaltyMinutes)}\n`;
-    response += `  • Итого: ${monthlyStats.netBalanceHours} ${monthlyStats.balanceStatus}\n`;
-
-    // Rating
-    response += `\n⭐ Рейтинг:\n`;
-    response += `  • Баллов: ${monthlyStats.totalPoints.toFixed(1)}\n`;
-    response += `  • Средний балл: ${monthlyStats.averageDailyPoints.toFixed(2)}\n`;
-    response += `  • Оценка: ${monthlyStats.rating.toFixed(1)}/10 ${monthlyStats.ratingZone}\n`;
+    response += `\n⏱ За месяц (${now.format('MMMM').toUpperCase()}):\n`;
+    response += `Отработано: ${CalculatorService.formatTimeDiff(Math.round(monthlyStats.totalHoursWorked * 60))} / ${CalculatorService.formatTimeDiff(Math.round(monthlyStats.totalHoursRequired * 60))}\n`;
+    response += `Баллы: ${monthlyStats.totalPoints.toFixed(1)}\n`;
+    response += `Рейтинг: ${monthlyStats.rating.toFixed(1)}/10 ${monthlyStats.ratingZone}`;
   } else {
-    // Fallback to old balance calculation if monthly report not available
+    // Fallback if monthly stats not available
     const balance = await sheetsService.getMonthlyBalance(user.telegramId);
-    response += `\n\n⏱ БАЛАНС ВРЕМЕНИ ЗА МЕСЯЦ:\n`;
-
-    if (balance.totalDeficitMinutes > 0) {
-      response += `⚠️ Недоработка: ${CalculatorService.formatTimeDiff(balance.totalDeficitMinutes)}\n`;
-    }
-    if (balance.totalSurplusMinutes > 0) {
-      response += `✅ Переработка: ${CalculatorService.formatTimeDiff(balance.totalSurplusMinutes)}\n`;
-    }
+    response += `\n⏱ За месяц:\n`;
 
     const netBalance = balance.netBalanceMinutes;
     if (netBalance > 0) {
-      response += `📊 Итого: +${CalculatorService.formatTimeDiff(netBalance)}`;
+      response += `Баланс: +${CalculatorService.formatTimeDiff(netBalance)}`;
     } else if (netBalance < 0) {
-      response += `📊 Итого: -${CalculatorService.formatTimeDiff(Math.abs(netBalance))}`;
+      response += `Баланс: -${CalculatorService.formatTimeDiff(Math.abs(netBalance))}`;
     } else {
-      response += `📊 Итого: 0 ч (баланс)`;
+      response += `Баланс: 0 (норма)`;
     }
   }
 

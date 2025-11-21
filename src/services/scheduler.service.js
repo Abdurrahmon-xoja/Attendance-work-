@@ -682,6 +682,25 @@ class SchedulerService {
         return;
       }
 
+      // Skip reminders on Sunday OR (Saturday AND user doesn't work on Saturday)
+      const now = moment.tz(Config.TIMEZONE);
+      const isSunday = now.day() === 0;
+      const isSaturday = now.day() === 6;
+
+      if (isSunday) {
+        logger.info(`Skipping work reminder for ${name} - today is Sunday`);
+        return;
+      }
+
+      if (isSaturday) {
+        // Check if user works on Saturday
+        const user = await sheetsService.findEmployeeByTelegramId(telegramId);
+        if (user && user.doNotWorkSaturday) {
+          logger.info(`Skipping work reminder for ${name} - Saturday is their day off`);
+          return;
+        }
+      }
+
       let message;
       if (reminderNumber === 1) {
         // 15 minutes before work
@@ -1294,7 +1313,8 @@ class SchedulerService {
           // Calculate hours worked
           const arrivalTime = moment.tz(`${dateStr} ${whenCome}`, 'YYYY-MM-DD HH:mm', Config.TIMEZONE);
           const departureTime = moment.tz(`${dateStr} ${endTime}`, 'YYYY-MM-DD HH:mm', Config.TIMEZONE);
-          const hoursWorked = departureTime.diff(arrivalTime, 'minutes') / 60;
+          const minutesWorked = departureTime.diff(arrivalTime, 'minutes');
+          const hoursWorked = minutesWorked / 60;
           row.set('Hours worked', hoursWorked.toFixed(2));
 
           await row.save();
@@ -1307,12 +1327,13 @@ class SchedulerService {
             const formattedDate = moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY');
             const formattedTomorrow = moment.tz(tomorrow, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
 
+            const CalculatorService = require('./calculator.service');
             const sent = await this.sendMessageSafe(
               telegramId,
               `⚠️ Ваше рабочее время автоматически завершено\n\n` +
               `📅 Дата: ${formattedDate}\n` +
               `🕐 Время окончания: ${endTime}\n` +
-              `⏱ Отработано часов: ${hoursWorked.toFixed(2)}\n\n` +
+              `⏱ Отработано: ${CalculatorService.formatTimeDiff(minutesWorked)}\n\n` +
               `Если вы всё ещё работаете ночную смену, нажмите кнопку ниже, чтобы отметить приход на новый день (${formattedTomorrow}):`,
               Markup.inlineKeyboard([
                 [Markup.button.callback('✅ Я всё ещё здесь - Отметить приход', `overnight_still_working:${tomorrow}`)]

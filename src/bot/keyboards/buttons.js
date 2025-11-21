@@ -176,7 +176,7 @@ class Keyboards {
       [Markup.button.callback('🏦 Банк/Документы', 'temp_exit_reason:documents')],
       [Markup.button.callback('👨‍👩‍👧 Семейные дела', 'temp_exit_reason:family')],
       [Markup.button.callback('🚗 Транспорт', 'temp_exit_reason:transport')],
-      [Markup.button.callback('🏗 Выхожу на обек', 'temp_exit_reason:object')],
+      [Markup.button.callback('🏗 Выхожу на объект', 'temp_exit_reason:object')],
       [Markup.button.callback('📝 Другая причина', 'temp_exit_reason:other')],
       [Markup.button.callback('❌ Отмена', 'temp_exit_reason:cancel')]
     ]);
