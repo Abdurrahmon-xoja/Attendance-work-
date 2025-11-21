@@ -756,93 +756,8 @@ function setupAttendanceHandlers(bot) {
     // Check if leaving before official end time
     const isLeavingEarly = now.isBefore(requiredEndTime);
 
-    if (workedFullHours && isLeavingEarly) {
-      // Worked full hours but leaving before official end time
-      // REQUEST LOCATION if enabled
-      if (Config.ENABLE_LOCATION_TRACKING) {
-        // Store checkout state
-        awaitingLocationForCheckout.set(user.telegramId.toString(), {
-          requestTime: Date.now(),
-          user: user,
-          checkoutTime: now,
-          departureType: 'button',
-          workTimeData: {
-            workTime: workTime,
-            arrivalTime: status.arrivalTime
-          }
-        });
-
-        const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
-        const trackingTime = trackingSeconds < 60
-          ? `${trackingSeconds} seconds`
-          : `${Math.round(trackingSeconds / 60)} minute(s)`;
-
-        await ctx.reply(
-          `✅ Вы отработали требуемое количество часов!\n\n` +
-          `Требуется: ${CalculatorService.formatTimeDiff(requiredWorkMinutes)}\n` +
-          `Вы отработали: ${CalculatorService.formatTimeDiff(actualWorkedMinutes)}\n\n` +
-          `⚠️ Но вы уходите раньше официального времени окончания работы (${requiredEndTime.format('HH:mm')}).\n\n` +
-          `📍 Пожалуйста, подтвердите ваше местоположение для завершения.`,
-          Keyboards.getMainMenu(ctx.from.id)
-        );
-
-        await ctx.reply(
-          `📍 **ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ МЕСТОПОЛОЖЕНИЯ**\n\n` +
-          `Для подтверждения ухода, пожалуйста, поделитесь ВАШИМ ТЕКУЩИМ МЕСТОПОЛОЖЕНИЕМ ОНЛАЙН.\n\n` +
-          `⚠️ **ВАЖНО:**\n` +
-          `1️⃣ Нажмите кнопку "📎" (вложение)\n` +
-          `2️⃣ Выберите "Геолокация"\n` +
-          `3️⃣ Выберите "Поделиться моим местоположением онлайн"\n` +
-          `4️⃣ Установите время на 15 минут или больше\n\n` +
-          `📍 Проверка займет примерно ${trackingTime}.\n\n` +
-          `❌ Пожалуйста, НЕ отправляйте "Текущее местоположение" - оно будет отклонено!`,
-          { parse_mode: 'Markdown' }
-        );
-
-        // Set timeout - 5 minutes
-        setTimeout(() => {
-          if (awaitingLocationForCheckout.has(user.telegramId.toString())) {
-            awaitingLocationForCheckout.delete(user.telegramId.toString());
-            logger.warn(`Checkout location request timeout for user ${user.telegramId}`);
-          }
-        }, 5 * 60 * 1000);
-
-        return; // Exit here - wait for location
-      }
-
-      // FALLBACK: Location tracking disabled
-      await sheetsService.logEvent(
-        user.telegramId,
-        user.nameFull,
-        'DEPARTURE',
-        'Worked full hours (early schedule)',
-        0.0
-      );
-
-      // Get today's points
-      const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
-      const todayPoint = updatedStatus.todayPoint || 0;
-
-      let pointEmoji = '🟢';
-      if (todayPoint < 0) {
-        pointEmoji = '🔴';
-      } else if (todayPoint === 0) {
-        pointEmoji = '🟡';
-      }
-
-      await ctx.reply(
-        `✅ Вы отработали требуемое количество часов!\n\n` +
-        `Требуется: ${CalculatorService.formatTimeDiff(requiredWorkMinutes)}\n` +
-        `Вы отработали: ${CalculatorService.formatTimeDiff(actualWorkedMinutes)}\n\n` +
-        `⚠️ Но вы уходите раньше официального времени окончания работы (${requiredEndTime.format('HH:mm')}).\n` +
-        `Это будет зафиксировано в системе.\n\n` +
-        `👋 Хорошего отдыха!\n\n` +
-        `📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`,
-        Keyboards.getMainMenu(ctx.from.id)
-      );
-
-      logger.info(`${user.nameFull} left early but worked full hours: ${actualWorkedHours}h`);
-    } else if (!workedFullHours && isLeavingEarly) {
+    // If person worked full hours, treat as normal departure regardless of scheduled end time
+    if (!workedFullHours && isLeavingEarly) {
       // Did NOT work full hours and leaving early - ask for reason
       const remainingMinutes = requiredWorkMinutes - actualWorkedMinutes;
 
@@ -3765,12 +3680,17 @@ function setupAttendanceHandlers(bot) {
       const isEarly = checkoutTime.isBefore(scheduledEnd);
       const earlyMinutes = isEarly ? scheduledEnd.diff(checkoutTime, 'minutes') : 0;
 
+      // Calculate required work hours (scheduled shift duration)
+      const requiredWorkMinutes = workTime.end.diff(workTime.start, 'minutes');
+      const workedFullHours = workedMinutes >= requiredWorkMinutes;
+
       let responseText = `✅ **Уход отмечен!**\n\n`;
       let eventType = 'DEPARTURE';
       let details = departureMessage ? `message: ${departureMessage}` : 'normal';
       let ratingImpact = 0.0;
 
-      if (isEarly) {
+      if (isEarly && !workedFullHours) {
+        // Leaving early AND did not work full required hours - apply penalties
         responseText += `⚠️ Ранний уход: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
         details = `early_${earlyMinutes}min` + (departureMessage ? `, msg: ${departureMessage}` : '');
 
@@ -3783,7 +3703,9 @@ function setupAttendanceHandlers(bot) {
           responseText += `📝 Указана причина: ${departureMessage}\n`;
         }
       } else {
+        // Either left on time OR worked full required hours - treat as normal departure
         responseText += `✅ Ушли вовремя или позже\n`;
+        details = 'normal';
       }
 
       responseText += `\n⏱️ Отработано: ${CalculatorService.formatTimeDiff(workedMinutes)}\n`;

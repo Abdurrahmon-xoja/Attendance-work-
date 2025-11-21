@@ -1094,18 +1094,14 @@ class SheetsService {
 
           // Check if person worked full required hours
           if (workedFullHours) {
-            // Worked full hours - no penalty, but note they left early
-            leftEarly = 'Yes (worked full hours)';
+            // Worked full hours - treat as normal departure, no penalty, no early departure flag
+            leftEarly = 'No';
             remainingHours = '0';
 
-            // Store reason if provided
-            if (details && details !== 'on_time' && details !== 'On time' && details !== 'Worked full hours (early schedule)') {
-              employeeRow.set('Why left early', details);
-            } else {
-              employeeRow.set('Why left early', 'Worked full hours, early schedule');
-            }
+            // Don't record any early departure reason since they worked their full required hours
+            // (Do not set 'Why left early' field at all)
 
-            logger.info(`${name} left early but worked full hours: ${actualWorkedMinutes} min. No penalty.`);
+            logger.info(`${name} left at ${now.format('HH:mm')} after working full hours (${actualWorkedMinutes} min). Treated as normal departure.`);
           } else {
             // Did NOT work full hours - calculate remaining and apply penalty
             // Calculate remaining hours based on required work hours
