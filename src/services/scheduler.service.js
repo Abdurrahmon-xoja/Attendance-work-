@@ -221,12 +221,12 @@ class SchedulerService {
   }
 
   /**
-   * Check every minute for reminders to send
+   * Check every 5 minutes for reminders to send
    * Sends reminder 15 minutes before work start time
    */
   setupReminderChecks() {
-    // Run every minute to check if we need to send reminders
-    const job = cron.schedule('* * * * *', async () => {
+    // Run every 5 minutes to check if we need to send reminders
+    const job = cron.schedule('*/5 * * * *', async () => {
       try {
         await this.checkAndSendReminders();
       } catch (error) {
@@ -237,7 +237,7 @@ class SchedulerService {
     });
 
     this.jobs.push(job);
-    logger.info('Reminder check job scheduled (runs every minute)');
+    logger.info('Reminder check job scheduled (runs every 5 minutes)');
   }
 
   /**
