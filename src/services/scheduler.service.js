@@ -401,10 +401,10 @@ class SchedulerService {
           }
         }
 
-        // Check if person should be automatically marked as late (17+ minutes after start)
+        // Check if person should be automatically marked as late (20+ minutes after start)
         const minutesSinceStart = now.diff(workStart, 'minutes');
-        if (minutesSinceStart >= 17) {
-          // Person is 17+ minutes late
+        if (minutesSinceStart >= 20) {
+          // Person is 20+ minutes late
           // Check if they haven't notified they'll be late and haven't been marked yet
           const alreadyMarkedLate = cameOnTime.toLowerCase() === 'false' || cameOnTime === 'No';
           const notifiedLate = willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true';
