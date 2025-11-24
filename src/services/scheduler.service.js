@@ -406,14 +406,14 @@ class SchedulerService {
         if (minutesSinceStart >= 20) {
           // Person is 20+ minutes late
           // Check if they haven't notified they'll be late and haven't been marked yet
-          const alreadyMarkedLate = cameOnTime.toLowerCase() === 'false' || cameOnTime === 'No';
+          const alreadyMarkedLate = cameOnTime.toLowerCase() === 'no' || cameOnTime.toLowerCase() === 'false';
           const notifiedLate = willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true';
           const isAbsentNow = isAbsent.toLowerCase() === 'yes' || isAbsent.toLowerCase() === 'true';
 
           // Don't mark late if already marked late, notified, or marked absent (fraud)
           if (!alreadyMarkedLate && !notifiedLate && !isAbsentNow) {
             // Automatically mark as late (silent - no notification given)
-            row.set('Came on time', 'false');
+            row.set('Came on time', 'No');
             await this.retryOperation(async () => await row.save());
 
             // Log the silent late event
