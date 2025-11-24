@@ -889,13 +889,13 @@ class SchedulerService {
         let statusClass = '';
         let pointClass = '';
 
-        if (absent.toLowerCase() === 'true') {
+        if (absent.toLowerCase() === 'yes') {
           status = `Отсутствует`;
           if (whyAbsent) status += ` (${whyAbsent})`;
           statusClass = 'status-absent';
           absentCount++;
         } else if (whenCome) {
-          if (cameOnTime.toLowerCase() === 'true') {
+          if (cameOnTime.toLowerCase() === 'yes') {
             status = `Вовремя (${whenCome})`;
             statusClass = 'status-ontime';
           } else {
@@ -1139,12 +1139,18 @@ class SchedulerService {
         return;
       }
 
+      // Check if the date is a weekend
+      const checkDate = moment.tz(dateStr, Config.TIMEZONE);
+      const isSunday = checkDate.day() === 0;
+      const isSaturday = checkDate.day() === 6;
+
       // Get daily sheet
       const worksheet = await sheetsService.getWorksheet(dateStr);
       await worksheet.loadHeaderRow();
       const rows = await worksheet.getRows();
 
       let noShowCount = 0;
+      let skippedWeekend = 0;
 
       for (const row of rows) {
         const name = row.get('Name') || '';
@@ -1154,6 +1160,22 @@ class SchedulerService {
         const absent = row.get('Absent') || '';
         const willBeLate = row.get('will be late') || '';
         const currentPoint = parseFloat(row.get('Point') || '0');
+
+        // Skip no-show check on Sundays (everyone's day off)
+        if (isSunday) {
+          skippedWeekend++;
+          continue;
+        }
+
+        // Skip no-show check on Saturdays for employees who don't work on Saturday
+        if (isSaturday && telegramId.trim()) {
+          const employee = await sheetsService.findEmployeeByTelegramId(telegramId);
+          if (employee && employee.doNotWorkSaturday) {
+            logger.debug(`Skipping no-show check for ${name} - Saturday is their day off`);
+            skippedWeekend++;
+            continue;
+          }
+        }
 
         // Check if person has NO activity at all
         const hasNoActivity = !whenCome.trim() &&
@@ -1192,7 +1214,11 @@ class SchedulerService {
         }
       }
 
-      if (noShowCount > 0) {
+      if (isSunday) {
+        logger.info(`Skipped no-show check on ${dateStr} (Sunday - everyone's day off)`);
+      } else if (isSaturday && skippedWeekend > 0) {
+        logger.info(`No-show check on ${dateStr} (Saturday): Skipped ${skippedWeekend} employees with day off, marked ${noShowCount} no-shows`);
+      } else if (noShowCount > 0) {
         logger.info(`Marked ${noShowCount} employees as no-shows on ${dateStr}`);
       } else {
         logger.info(`No no-shows found on ${dateStr}`);
