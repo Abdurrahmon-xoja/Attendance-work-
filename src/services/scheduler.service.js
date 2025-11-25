@@ -663,6 +663,154 @@ class SchedulerService {
           this._lastAdjustedEndTimes.delete(key);
         }
       }
+
+      // AUTO-DEPARTURE CHECK: Check for employees who forgot to mark departure
+      if (Config.ENABLE_AUTO_DEPARTURE) {
+        for (const row of rows) {
+          const name = row.get('Name') || '';
+          const telegramId = row.get('TelegramId') || '';
+          const whenCome = row.get('When come') || '';
+          const leaveTime = row.get('Leave time') || '';
+          const autoDepartureWarningSent = row.get('auto_departure_warning_sent') || 'false';
+          const workExtensionMinutes = parseInt(row.get('work_extension_minutes') || '0');
+
+          // Skip if no telegram ID
+          if (!telegramId || !telegramId.trim()) {
+            continue;
+          }
+
+          // Skip if person hasn't arrived yet
+          if (!whenCome.trim()) {
+            continue;
+          }
+
+          // Skip if person already left
+          if (leaveTime.trim()) {
+            continue;
+          }
+
+          // Get work time from roster
+          let workTime = null;
+          for (const rosterRow of rosterRows) {
+            const rosterTelegramId = rosterRow.get('Telegram Id') || '';
+            if (rosterTelegramId.toString().trim() === telegramId.toString().trim()) {
+              workTime = rosterRow.get('Work time') || '';
+              break;
+            }
+          }
+
+          if (!workTime || workTime === '-') {
+            continue;
+          }
+
+          // Parse work end time
+          const endTime = workTime.split('-')[1]?.trim();
+          if (!endTime) continue;
+
+          const [endHour, endMinute] = endTime.split(':').map(num => parseInt(num));
+          let workEnd = moment.tz(Config.TIMEZONE)
+            .set({ hour: endHour, minute: endMinute, second: 0 });
+
+          // Add work extension if user requested it
+          if (workExtensionMinutes > 0) {
+            workEnd = workEnd.clone().add(workExtensionMinutes, 'minutes');
+          }
+
+          // Calculate auto-departure time (work end + grace period)
+          const autoDepartureTime = workEnd.clone().add(Config.AUTO_DEPARTURE_GRACE_MINUTES, 'minutes');
+          const warningTime = autoDepartureTime.clone().subtract(Config.AUTO_DEPARTURE_WARNING_MINUTES, 'minutes');
+
+          const minutesUntilAutoDeparture = autoDepartureTime.diff(now, 'minutes');
+          const currentMinute = now.format('HH:mm');
+          const warningMinute = warningTime.format('HH:mm');
+
+          // Send warning if it's time and not sent yet
+          if (currentMinute === warningMinute && autoDepartureWarningSent.toLowerCase() !== 'true') {
+            try {
+              const Markup = require('telegraf').Markup;
+
+              await this.retryTelegramOperation(async () => {
+                await this.bot.telegram.sendMessage(
+                  telegramId,
+                  `⏰ Напоминание об окончании работы\n\n` +
+                  `Ваше рабочее время закончилось в ${endTime}.\n` +
+                  `Вы не отметили уход.\n\n` +
+                  `⚠️ Через ${Config.AUTO_DEPARTURE_WARNING_MINUTES} минут вы будете автоматически отмечены как ушедший.\n\n` +
+                  `Что вы хотите сделать?`,
+                  Markup.inlineKeyboard([
+                    [
+                      Markup.button.callback('✅ Отметить уход сейчас', 'auto_depart_now'),
+                      Markup.button.callback('⏱ +30 мин', 'extend_work:30')
+                    ],
+                    [
+                      Markup.button.callback('⏱ +1 час', 'extend_work:60'),
+                      Markup.button.callback('⏱ +2 часа', 'extend_work:120')
+                    ],
+                    [
+                      Markup.button.callback('⏱ Работаю всю ночь', 'extend_work:480')
+                    ]
+                  ])
+                );
+              });
+
+              // Mark warning as sent
+              row.set('auto_departure_warning_sent', 'true');
+              await this.retryOperation(async () => await row.save());
+
+              logger.info(`Sent auto-departure warning to ${name} (${telegramId})`);
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            } catch (err) {
+              logger.error(`Failed to send auto-departure warning to ${telegramId}: ${err.message}`);
+            }
+          }
+
+          // Auto-depart if time has come
+          if (minutesUntilAutoDeparture <= 0) {
+            try {
+              const CalculatorService = require('./calculator.service');
+
+              // Mark departure
+              const departureTime = now.format('HH:mm');
+              row.set('Leave time', departureTime);
+
+              // Calculate hours worked
+              const arrivalTime = moment.tz(`${today} ${whenCome}`, 'YYYY-MM-DD HH:mm', Config.TIMEZONE);
+              const minutesWorked = now.diff(arrivalTime, 'minutes');
+              const hoursWorked = minutesWorked / 60;
+              row.set('Hours worked', hoursWorked.toFixed(2));
+
+              await this.retryOperation(async () => await row.save());
+
+              // Log the auto-departure event
+              await sheetsService.logEvent(
+                telegramId,
+                name,
+                'AUTO_DEPARTURE',
+                `автоматически отмечен как ушедший в ${departureTime}`,
+                0
+              );
+
+              // Send notification to employee
+              const sent = await this.sendMessageSafe(
+                telegramId,
+                `✅ Вы автоматически отмечены как ушедший\n\n` +
+                `🕐 Время ухода: ${departureTime}\n` +
+                `⏱ Отработано: ${CalculatorService.formatTimeDiff(minutesWorked)}\n\n` +
+                `Если вы всё ещё на работе, пожалуйста, отметьте приход заново.`
+              );
+
+              if (!sent) {
+                logger.warn(`Could not send auto-departure notification to ${telegramId} - user blocked or unreachable`);
+              }
+
+              logger.info(`Auto-departed ${name} (${telegramId}) at ${departureTime} after ${minutesWorked} minutes of work`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            } catch (err) {
+              logger.error(`Failed to auto-depart ${telegramId}: ${err.message}`);
+            }
+          }
+        }
+      }
     } catch (error) {
       logger.error(`Error checking reminders: ${error.message}`);
     }
@@ -871,6 +1019,7 @@ class SchedulerService {
       let lateCount = 0;
       let absentCount = 0;
       let leftEarlyCount = 0;
+      let notifiedLateCount = 0;
 
       let employeeRows = '';
       for (const row of rows) {
@@ -882,6 +1031,8 @@ class SchedulerService {
         const leftEarly = row.get('Left early') || '';
         const absent = row.get('Absent') || '';
         const whyAbsent = row.get('Why absent') || '';
+        const willBeLate = row.get('will be late') || '';
+        const willBeLateTime = row.get('will be late will come at') || '';
         const point = row.get('Point') || '0';
         const pointNum = parseFloat(point);
 
@@ -895,14 +1046,27 @@ class SchedulerService {
           statusClass = 'status-absent';
           absentCount++;
         } else if (whenCome) {
-          if (cameOnTime.toLowerCase() === 'yes') {
-            status = `Вовремя (${whenCome})`;
-            statusClass = 'status-ontime';
-          } else {
+          // Check if explicitly marked as late (No or false)
+          if (cameOnTime.toLowerCase() === 'no' || cameOnTime.toLowerCase() === 'false') {
             status = `Опоздал (${whenCome})`;
             statusClass = 'status-late';
             lateCount++;
+          } else {
+            // Default to on-time if 'Yes', 'true', or empty (when marked on time)
+            status = `Вовремя (${whenCome})`;
+            statusClass = 'status-ontime';
           }
+
+          // Add "will be late" notification if they informed about lateness
+          if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+            status += `<br><small>⏰ Предупредил об опоздании`;
+            if (willBeLateTime.trim()) {
+              status += ` (${willBeLateTime})`;
+            }
+            status += `</small>`;
+            notifiedLateCount++;
+          }
+
           presentCount++;
 
           if (leaveTime) {
@@ -916,6 +1080,16 @@ class SchedulerService {
         } else {
           status = `Не пришёл`;
           statusClass = 'status-notarrived';
+
+          // Check if person notified they'll be late but hasn't arrived yet
+          if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+            status = `Ожидается`;
+            if (willBeLateTime.trim()) {
+              status += ` (${willBeLateTime})`;
+            }
+            statusClass = 'status-waiting';
+            notifiedLateCount++;
+          }
         }
 
         if (pointNum > 0) {
@@ -958,6 +1132,7 @@ class SchedulerService {
     .stat-late .number { color: #f59e0b; }
     .stat-absent .number { color: #ef4444; }
     .stat-early .number { color: #8b5cf6; }
+    .stat-notified .number { color: #3b82f6; }
     .table-container { padding: 30px; overflow-x: auto; }
     table { width: 100%; border-collapse: separate; border-spacing: 0 10px; }
     thead th { background: #667eea; color: white; padding: 15px; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 12px; letter-spacing: 1px; }
@@ -972,6 +1147,7 @@ class SchedulerService {
     .status-late { color: #f59e0b; font-weight: 500; }
     .status-absent { color: #ef4444; font-weight: 500; }
     .status-notarrived { color: #94a3b8; font-weight: 500; }
+    .status-waiting { color: #3b82f6; font-weight: 500; }
     .point-good { color: #10b981; }
     .point-neutral { color: #f59e0b; }
     .point-bad { color: #ef4444; }
@@ -988,6 +1164,7 @@ class SchedulerService {
       <div class="stat-card stat-total"><div class="number">${rows.length}</div><div class="label">Всего сотрудников</div></div>
       <div class="stat-card stat-present"><div class="number">${presentCount}</div><div class="label">Присутствуют</div></div>
       <div class="stat-card stat-late"><div class="number">${lateCount}</div><div class="label">Опоздали</div></div>
+      <div class="stat-card stat-notified"><div class="number">${notifiedLateCount}</div><div class="label">Предупредили</div></div>
       <div class="stat-card stat-absent"><div class="number">${absentCount}</div><div class="label">Отсутствуют</div></div>
       <div class="stat-card stat-early"><div class="number">${leftEarlyCount}</div><div class="label">Ушли рано</div></div>
     </div>

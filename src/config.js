@@ -60,6 +60,11 @@ class Config {
   static AUTO_CREATE_DAILY_SHEET = process.env.AUTO_CREATE_DAILY_SHEET === 'true';
   static AUTO_UPDATE_MONTHLY_REPORT = process.env.AUTO_UPDATE_MONTHLY_REPORT !== 'false';
   static ENABLE_WORK_REMINDERS = process.env.ENABLE_WORK_REMINDERS === 'true';
+  static ENABLE_AUTO_DEPARTURE = process.env.ENABLE_AUTO_DEPARTURE !== 'false';
+
+  // Auto-Departure Configuration
+  static AUTO_DEPARTURE_GRACE_MINUTES = parseInt(process.env.AUTO_DEPARTURE_GRACE_MINUTES || '15');
+  static AUTO_DEPARTURE_WARNING_MINUTES = parseInt(process.env.AUTO_DEPARTURE_WARNING_MINUTES || '10');
 
   // Notification Configuration
   static NOTIFICATION_ARRIVAL_MINUS_5 = process.env.NOTIFICATION_ARRIVAL_MINUS_5 !== 'false';

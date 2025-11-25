@@ -3325,6 +3325,168 @@ function setupAttendanceHandlers(bot) {
     }
   });
 
+  // AUTO-DEPARTURE: Handle "Depart Now" button
+  bot.action('auto_depart_now', async (ctx) => {
+    const user = await getUserOrPromptRegistration(ctx);
+    if (!user) {
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const today = now.format('YYYY-MM-DD');
+
+      // Check if user has already departed
+      const status = await sheetsService.getUserStatusToday(user.telegramId);
+      if (status.hasDeparted) {
+        await ctx.answerCbQuery('❌ Вы уже отметили уход');
+        return;
+      }
+
+      if (!status.hasArrived) {
+        await ctx.answerCbQuery('❌ Вы не отмечали приход сегодня');
+        return;
+      }
+
+      // Get the user's row
+      const worksheet = await sheetsService.getWorksheet(today);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (!employeeRow) {
+        await ctx.answerCbQuery('❌ Ошибка: данные не найдены');
+        return;
+      }
+
+      // Mark departure
+      const departureTime = now.format('HH:mm');
+      const whenCome = employeeRow.get('When come') || '';
+
+      employeeRow.set('Leave time', departureTime);
+
+      // Calculate hours worked
+      const arrivalTime = moment.tz(`${today} ${whenCome}`, 'YYYY-MM-DD HH:mm', Config.TIMEZONE);
+      const minutesWorked = now.diff(arrivalTime, 'minutes');
+      const hoursWorked = minutesWorked / 60;
+      employeeRow.set('Hours worked', hoursWorked.toFixed(2));
+
+      await employeeRow.save();
+
+      // Log the departure event
+      await sheetsService.logEvent(
+        user.telegramId,
+        user.nameFull,
+        'DEPARTURE',
+        'Уход отмечен через кнопку авто-ухода',
+        0
+      );
+
+      await ctx.answerCbQuery();
+      await ctx.editMessageText(
+        `✅ Уход успешно отмечен!\n\n` +
+        `🕐 Время ухода: ${departureTime}\n` +
+        `⏱ Отработано: ${CalculatorService.formatTimeDiff(minutesWorked)}\n\n` +
+        `Хорошего вечера! 👋`
+      );
+
+      logger.info(`${user.nameFull} marked departure via auto-depart button at ${departureTime}`);
+    } catch (error) {
+      await ctx.answerCbQuery('❌ Ошибка');
+      logger.error(`Error handling auto-depart now: ${error.message}`);
+    }
+  });
+
+  // AUTO-DEPARTURE: Handle "Extend Work" button
+  bot.action(/extend_work:(\d+)/, async (ctx) => {
+    const extendMinutes = parseInt(ctx.match[1]);
+
+    const user = await getUserOrPromptRegistration(ctx);
+    if (!user) {
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const today = now.format('YYYY-MM-DD');
+
+      // Check if user has already departed
+      const status = await sheetsService.getUserStatusToday(user.telegramId);
+      if (status.hasDeparted) {
+        await ctx.answerCbQuery('❌ Вы уже отметили уход');
+        return;
+      }
+
+      if (!status.hasArrived) {
+        await ctx.answerCbQuery('❌ Вы не отмечали приход сегодня');
+        return;
+      }
+
+      // Get the user's row
+      const worksheet = await sheetsService.getWorksheet(today);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (!employeeRow) {
+        await ctx.answerCbQuery('❌ Ошибка: данные не найдены');
+        return;
+      }
+
+      // Get current extension and add to it
+      const currentExtension = parseInt(employeeRow.get('work_extension_minutes') || '0');
+      const newExtension = currentExtension + extendMinutes;
+
+      // Update work extension
+      employeeRow.set('work_extension_minutes', newExtension.toString());
+      // Reset warning sent flag so user gets a new warning later
+      employeeRow.set('auto_departure_warning_sent', 'false');
+
+      await employeeRow.save();
+
+      const hours = Math.floor(extendMinutes / 60);
+      const mins = extendMinutes % 60;
+      const extendText = hours > 0 ? `${hours} ч ${mins} мин` : `${mins} мин`;
+
+      await ctx.answerCbQuery();
+      await ctx.editMessageText(
+        `✅ Рабочее время продлено на ${extendText}\n\n` +
+        `Вы получите новое напоминание перед окончанием продленного времени.\n\n` +
+        `Не забудьте отметить уход, когда закончите работу!`
+      );
+
+      logger.info(`${user.nameFull} extended work by ${extendMinutes} min (total extension: ${newExtension} min)`);
+
+      // Log the extension event
+      await sheetsService.logEvent(
+        user.telegramId,
+        user.nameFull,
+        'WORK_EXTENDED',
+        `Работа продлена на ${extendText}`,
+        0
+      );
+    } catch (error) {
+      await ctx.answerCbQuery('❌ Ошибка');
+      logger.error(`Error extending work time: ${error.message}`);
+    }
+  });
+
   // Return from temporary exit button
   bot.hears('↩️ Вернулся', async (ctx) => {
     const user = await getUserOrPromptRegistration(ctx);

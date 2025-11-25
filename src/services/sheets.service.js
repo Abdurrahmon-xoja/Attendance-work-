@@ -524,8 +524,8 @@ class SheetsService {
 
       // If headers don't exist, initialize the sheet
       if (!hasHeaders) {
-        // Resize sheet to fit all columns (we now have 38 columns with departure tracking)
-        await worksheet.resize({ rowCount: 1000, columnCount: 44 });
+        // Resize sheet to fit all columns (we now have 41 columns with auto-departure tracking)
+        await worksheet.resize({ rowCount: 1000, columnCount: 47 });
 
         // Set headers
         await worksheet.setHeaderRow([
@@ -566,7 +566,10 @@ class SheetsService {
           'Arrival Location',
           'Arrival Location Accuracy',
           'Arrival Anomalies',
-          'Arrival Verification Status'
+          'Arrival Verification Status',
+          'departure_reminder_sent',
+          'auto_departure_warning_sent',
+          'work_extension_minutes'
         ]);
         await worksheet.loadHeaderRow();
 
