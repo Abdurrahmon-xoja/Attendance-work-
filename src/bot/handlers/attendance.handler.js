@@ -3487,6 +3487,8 @@ function setupAttendanceHandlers(bot) {
       employeeRow.set('work_extension_minutes', newExtension.toString());
       // Reset warning sent flag so user gets a new warning later
       employeeRow.set('auto_departure_warning_sent', 'false');
+      // Reset extended work reminder flag so user gets a new reminder for the new extended time
+      employeeRow.set('extended_work_reminder_sent', 'false');
 
       await employeeRow.save();
 

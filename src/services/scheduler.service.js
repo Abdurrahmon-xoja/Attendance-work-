@@ -151,6 +151,44 @@ class SchedulerService {
   }
 
   /**
+   * Round time to nearest 5-minute interval for cron matching
+   * Since cron runs every 5 minutes, we need to round reminder times
+   * to match the cron schedule (00, 05, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)
+   *
+   * @param {moment} momentTime - Moment object to round
+   * @returns {string} Rounded time in HH:mm format
+   *
+   * Examples:
+   * - 09:17 → 09:15 (2 min early)
+   * - 09:18 → 09:20 (2 min late)
+   * - 09:32 → 09:30 (2 min early)
+   * - 09:33 → 09:35 (2 min late)
+   *
+   * Maximum difference: ±2 minutes
+   */
+  roundToNearest5Minutes(momentTime) {
+    const minute = momentTime.minute();
+    const remainder = minute % 5;
+
+    let roundedMinute;
+    if (remainder === 0) {
+      // Already on 5-minute interval
+      roundedMinute = minute;
+    } else if (remainder <= 2) {
+      // Round down (0-2 minutes: round down)
+      roundedMinute = minute - remainder;
+    } else {
+      // Round up (3-4 minutes: round up)
+      roundedMinute = minute + (5 - remainder);
+    }
+
+    // Handle minute overflow (e.g., 59 → 60 becomes next hour)
+    const rounded = momentTime.clone().minute(roundedMinute).second(0);
+
+    return rounded.format('HH:mm');
+  }
+
+  /**
    * Initialize scheduler with bot instance
    * @param {Object} bot - Telegraf bot instance
    */
@@ -305,10 +343,10 @@ class SchedulerService {
         // Check if person already did any action
         const hasArrived = whenCome.trim() !== '';
         const hasNotifiedLate = willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true';
-        const shouldSendReminders = !hasArrived && !hasNotifiedLate;
+        const shouldSendReminders = !hasArrived;
 
-        // Skip reminders if person already arrived or notified late
-        // But continue to check for auto-late marking
+        // Skip reminders if person already arrived
+        // If person notified they'll be late, reminders will be sent using adjusted expected arrival time
         if (hasArrived) {
           continue;
         }
@@ -360,9 +398,10 @@ class SchedulerService {
         }
 
         // Calculate 3 reminder times (based on adjusted time if late notification given)
-        const reminder1Time = workStart.clone().subtract(15, 'minutes').format('HH:mm');
-        const reminder2Time = workStart.format('HH:mm');
-        const reminder3Time = workStart.clone().add(15, 'minutes').format('HH:mm');
+        // Round to nearest 5-minute interval since cron runs every 5 minutes
+        const reminder1Time = this.roundToNearest5Minutes(workStart.clone().subtract(15, 'minutes'));
+        const reminder2Time = this.roundToNearest5Minutes(workStart.clone());
+        const reminder3Time = this.roundToNearest5Minutes(workStart.clone().add(15, 'minutes'));
 
         // Use adjusted time for reminder messages if person notified they'll be late
         const reminderTime = workStart.format('HH:mm');
@@ -652,6 +691,103 @@ class SchedulerService {
             await new Promise(resolve => setTimeout(resolve, 2000)); // Increased from 500ms to 2s
           } catch (err) {
             logger.error(`Failed to send departure reminder to ${telegramId}: ${err.message}`);
+          }
+        }
+      }
+
+      // Check for extended work reminders (15 min before extended end time)
+      for (const row of rows) {
+        const name = row.get('Name') || '';
+        const telegramId = row.get('TelegramId') || '';
+        const whenCome = row.get('When come') || '';
+        const leaveTime = row.get('Leave time') || '';
+        const workExtensionMinutes = parseInt(row.get('work_extension_minutes') || '0');
+        const extendedWorkReminderSent = row.get('extended_work_reminder_sent') || 'false';
+
+        // Skip if no telegram ID
+        if (!telegramId || !telegramId.trim()) {
+          continue;
+        }
+
+        // Skip if person hasn't arrived yet
+        if (!whenCome.trim()) {
+          continue;
+        }
+
+        // Skip if person already left
+        if (leaveTime.trim()) {
+          continue;
+        }
+
+        // Skip if no work extension
+        if (workExtensionMinutes <= 0) {
+          continue;
+        }
+
+        // Skip if reminder already sent
+        if (extendedWorkReminderSent.toLowerCase() === 'true') {
+          continue;
+        }
+
+        // Get work time from roster
+        let workTime = null;
+        for (const rosterRow of rosterRows) {
+          const rosterTelegramId = rosterRow.get('Telegram Id') || '';
+          if (rosterTelegramId.toString().trim() === telegramId.toString().trim()) {
+            workTime = rosterRow.get('Work time') || '';
+            break;
+          }
+        }
+
+        if (!workTime || workTime === '-') {
+          continue;
+        }
+
+        // Parse work end time
+        const endTime = workTime.split('-')[1]?.trim();
+        if (!endTime) continue;
+
+        const [endHour, endMinute] = endTime.split(':').map(num => parseInt(num));
+        let workEnd = moment.tz(Config.TIMEZONE)
+          .set({ hour: endHour, minute: endMinute, second: 0 });
+
+        // Add work extension to end time
+        const extendedWorkEnd = workEnd.clone().add(workExtensionMinutes, 'minutes');
+
+        // Calculate reminder time (15 min before extended end time)
+        // Round to nearest 5-minute interval since cron runs every 5 minutes
+        const extendedWorkReminderTime = this.roundToNearest5Minutes(
+          extendedWorkEnd.clone().subtract(15, 'minutes')
+        );
+
+        // Check if current time matches reminder time
+        if (currentMinute === extendedWorkReminderTime) {
+          try {
+            const extendedEndTimeStr = extendedWorkEnd.format('HH:mm');
+            const hours = Math.floor(workExtensionMinutes / 60);
+            const mins = workExtensionMinutes % 60;
+            const extensionText = hours > 0 ? `${hours} ч ${mins} мин` : `${mins} мин`;
+
+            const message =
+              `⏰ Напоминание о продленном рабочем времени\n\n` +
+              `Ваше продленное рабочее время заканчивается через 15 минут\n` +
+              `Время окончания: ${extendedEndTimeStr}\n\n` +
+              `Вы продлили работу на: ${extensionText}\n\n` +
+              `Не забудьте отметить уход командой "- сообщение"`;
+
+            await this.retryTelegramOperation(async () => {
+              await this.bot.telegram.sendMessage(telegramId, message);
+            });
+
+            // Mark reminder as sent
+            row.set('extended_work_reminder_sent', 'true');
+            await this.retryOperation(async () => await row.save());
+
+            logger.info(`Sent extended work reminder to ${name} (${telegramId}) for ${extendedEndTimeStr} (extension: ${extensionText})`);
+            // Add delay to avoid rate limit
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } catch (err) {
+            logger.error(`Failed to send extended work reminder to ${telegramId}: ${err.message}`);
           }
         }
       }

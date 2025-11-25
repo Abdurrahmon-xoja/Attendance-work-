@@ -569,7 +569,8 @@ class SheetsService {
           'Arrival Verification Status',
           'departure_reminder_sent',
           'auto_departure_warning_sent',
-          'work_extension_minutes'
+          'work_extension_minutes',
+          'extended_work_reminder_sent'
         ]);
         await worksheet.loadHeaderRow();
 
