@@ -2435,6 +2435,7 @@ function setupAttendanceHandlers(bot) {
     .stat-late .number { color: #f59e0b; }
     .stat-absent .number { color: #ef4444; }
     .stat-early .number { color: #8b5cf6; }
+    .stat-notified .number { color: #3b82f6; }
     .table-container {
       padding: 30px;
       overflow-x: auto;
@@ -2491,6 +2492,7 @@ function setupAttendanceHandlers(bot) {
     .status-late { color: #f59e0b; font-weight: 500; }
     .status-absent { color: #ef4444; font-weight: 500; }
     .status-notarrived { color: #94a3b8; font-weight: 500; }
+    .status-waiting { color: #3b82f6; font-weight: 500; }
     .point-good { color: #10b981; }
     .point-neutral { color: #f59e0b; }
     .point-bad { color: #ef4444; }
@@ -4091,6 +4093,7 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
   let lateCount = 0;
   let absentCount = 0;
   let leftEarlyCount = 0;
+  let notifiedLateCount = 0;
 
   let employeeRows = '';
   for (const row of rows) {
@@ -4102,6 +4105,8 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     const leftEarly = row.get('Left early') || '';
     const absent = row.get('Absent') || '';
     const whyAbsent = row.get('Why absent') || '';
+    const willBeLate = row.get('will be late') || '';
+    const willBeLateTime = row.get('will be late will come at') || '';
     const point = row.get('Point') || '0';
     const pointNum = parseFloat(point);
 
@@ -4109,20 +4114,33 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     let statusClass = '';
     let pointClass = '';
 
-    if (absent.toLowerCase() === 'true') {
+    if (absent.toLowerCase() === 'yes' || absent.toLowerCase() === 'true') {
       status = `Отсутствует`;
       if (whyAbsent) status += ` (${whyAbsent})`;
       statusClass = 'status-absent';
       absentCount++;
     } else if (whenCome) {
-      if (cameOnTime.toLowerCase() === 'true') {
-        status = `Вовремя (${whenCome})`;
-        statusClass = 'status-ontime';
-      } else {
+      // Check if explicitly marked as late (No or false)
+      if (cameOnTime.toLowerCase() === 'no' || cameOnTime.toLowerCase() === 'false') {
         status = `Опоздал (${whenCome})`;
         statusClass = 'status-late';
         lateCount++;
+      } else {
+        // Default to on-time if 'Yes', 'true', or empty (when marked on time)
+        status = `Вовремя (${whenCome})`;
+        statusClass = 'status-ontime';
       }
+
+      // Add "will be late" notification if they informed about lateness
+      if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+        status += `<br><small>⏰ Предупредил об опоздании`;
+        if (willBeLateTime.trim()) {
+          status += ` (${willBeLateTime})`;
+        }
+        status += `</small>`;
+        notifiedLateCount++;
+      }
+
       presentCount++;
 
       if (leaveTime) {
@@ -4136,6 +4154,16 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     } else {
       status = `Не пришёл`;
       statusClass = 'status-notarrived';
+
+      // Check if person notified they'll be late but hasn't arrived yet
+      if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+        status = `Ожидается`;
+        if (willBeLateTime.trim()) {
+          status += ` (${willBeLateTime})`;
+        }
+        statusClass = 'status-waiting';
+        notifiedLateCount++;
+      }
     }
 
     if (pointNum > 0) {
@@ -4209,6 +4237,7 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     .stat-late .number { color: #f59e0b; }
     .stat-absent .number { color: #ef4444; }
     .stat-early .number { color: #8b5cf6; }
+    .stat-notified .number { color: #3b82f6; }
     .table-container { padding: 30px; overflow-x: auto; }
     table { width: 100%; border-collapse: separate; border-spacing: 0 10px; }
     thead th {
@@ -4251,6 +4280,7 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     .status-late { color: #f59e0b; font-weight: 500; }
     .status-absent { color: #ef4444; font-weight: 500; }
     .status-notarrived { color: #94a3b8; font-weight: 500; }
+    .status-waiting { color: #3b82f6; font-weight: 500; }
     .point-good { color: #10b981; }
     .point-neutral { color: #f59e0b; }
     .point-bad { color: #ef4444; }
@@ -4273,6 +4303,7 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
       <div class="stat-card stat-total"><div class="number">${rows.length}</div><div class="label">Всего сотрудников</div></div>
       <div class="stat-card stat-present"><div class="number">${presentCount}</div><div class="label">Присутствуют</div></div>
       <div class="stat-card stat-late"><div class="number">${lateCount}</div><div class="label">Опоздали</div></div>
+      <div class="stat-card stat-notified"><div class="number">${notifiedLateCount}</div><div class="label">Предупредили</div></div>
       <div class="stat-card stat-absent"><div class="number">${absentCount}</div><div class="label">Отсутствуют</div></div>
       <div class="stat-card stat-early"><div class="number">${leftEarlyCount}</div><div class="label">Ушли рано</div></div>
     </div>
