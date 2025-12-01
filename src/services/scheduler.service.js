@@ -443,6 +443,23 @@ class SchedulerService {
         // Check if person should be automatically marked as late (20+ minutes after start)
         const minutesSinceStart = now.diff(workStart, 'minutes');
         if (minutesSinceStart >= 20) {
+          // Skip auto-late marking on Sunday OR (Saturday AND user doesn't work on Saturday)
+          const isSunday = now.day() === 0;
+          const isSaturday = now.day() === 6;
+
+          if (isSunday) {
+            logger.debug(`Skipping auto-late marking for ${name} - today is Sunday`);
+            continue;
+          }
+
+          if (isSaturday) {
+            const user = await sheetsService.findEmployeeByTelegramId(telegramId);
+            if (user && user.doNotWorkSaturday) {
+              logger.debug(`Skipping auto-late marking for ${name} - Saturday is their day off`);
+              continue;
+            }
+          }
+
           // Person is 20+ minutes late
           // Check if they haven't notified they'll be late and haven't been marked yet
           const alreadyMarkedLate = cameOnTime.toLowerCase() === 'no' || cameOnTime.toLowerCase() === 'false';
@@ -600,6 +617,23 @@ class SchedulerService {
           continue;
         }
 
+        // Skip departure reminders on Sunday OR (Saturday AND user doesn't work on Saturday)
+        const isSunday = now.day() === 0;
+        const isSaturday = now.day() === 6;
+
+        if (isSunday) {
+          logger.debug(`Skipping departure reminder for ${name} - today is Sunday`);
+          continue;
+        }
+
+        if (isSaturday) {
+          const user = await sheetsService.findEmployeeByTelegramId(telegramId);
+          if (user && user.doNotWorkSaturday) {
+            logger.debug(`Skipping departure reminder for ${name} - Saturday is their day off`);
+            continue;
+          }
+        }
+
         // Get work time from roster
         let workTime = null;
         for (const rosterRow of rosterRows) {
@@ -727,6 +761,23 @@ class SchedulerService {
         // Skip if reminder already sent
         if (extendedWorkReminderSent.toLowerCase() === 'true') {
           continue;
+        }
+
+        // Skip extended work reminders on Sunday OR (Saturday AND user doesn't work on Saturday)
+        const isSunday = now.day() === 0;
+        const isSaturday = now.day() === 6;
+
+        if (isSunday) {
+          logger.debug(`Skipping extended work reminder for ${name} - today is Sunday`);
+          continue;
+        }
+
+        if (isSaturday) {
+          const user = await sheetsService.findEmployeeByTelegramId(telegramId);
+          if (user && user.doNotWorkSaturday) {
+            logger.debug(`Skipping extended work reminder for ${name} - Saturday is their day off`);
+            continue;
+          }
         }
 
         // Get work time from roster
@@ -1070,7 +1121,15 @@ class SchedulerService {
     // Run at 23:59 every day to send report to admins
     const job = cron.schedule('59 23 * * *', async () => {
       try {
-        const today = moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+        const now = moment.tz(Config.TIMEZONE);
+        const today = now.format('YYYY-MM-DD');
+
+        // Skip daily report on Sunday (day 0)
+        if (now.day() === 0) {
+          logger.info(`Skipping daily report for ${today} - today is Sunday`);
+          return;
+        }
+
         logger.info(`Sending daily report to admins for ${today}`);
 
         await this.sendDailyReportToAdmins(today);
@@ -1099,6 +1158,13 @@ class SchedulerService {
 
         // Check if tomorrow is the 1st (i.e., today is last day of month)
         if (tomorrow.date() === 1) {
+          // Skip monthly report on Sunday (day 0)
+          if (now.day() === 0) {
+            const yearMonth = now.format('YYYY-MM');
+            logger.info(`Skipping monthly report for ${yearMonth} - today is Sunday`);
+            return;
+          }
+
           const yearMonth = now.format('YYYY-MM');
           logger.info(`Sending monthly report to admins for ${yearMonth}`);
 
