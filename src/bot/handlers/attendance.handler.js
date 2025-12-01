@@ -2257,12 +2257,17 @@ function setupAttendanceHandlers(bot) {
         logger.info(`Created new monthly report ${reportSheetName}`);
       }
 
-      await ctx.reply(`🔄 Обновляю отчёт данными всех дней месяца...`);
-
       // Update with all daily sheets from this month
       const startOfMonth = moment.tz(Config.TIMEZONE).startOf('month');
       const currentDay = now.date();
       let processedDays = 0;
+      let skippedDays = 0;
+
+      // Send progress message
+      const progressMsg = await ctx.reply(
+        `🔄 Обновляю отчёт данными всех дней месяца...\n\n` +
+        `📅 Обрабатываю дни: 0/${currentDay}`
+      );
 
       for (let day = 1; day <= currentDay; day++) {
         const dateStr = moment.tz(Config.TIMEZONE).set('date', day).format('YYYY-MM-DD');
@@ -2274,10 +2279,29 @@ function setupAttendanceHandlers(bot) {
           processedDays++;
           logger.info(`Updated monthly report with data from ${dateStr}`);
 
+          // Update progress every 5 days or on last day
+          if (day % 5 === 0 || day === currentDay) {
+            try {
+              await ctx.telegram.editMessageText(
+                ctx.chat.id,
+                progressMsg.message_id,
+                null,
+                `🔄 Обновляю отчёт данными всех дней месяца...\n\n` +
+                `📅 Обработано: ${processedDays}/${currentDay} дней\n` +
+                `⏳ Идёт обработка...`
+              );
+            } catch (err) {
+              // Ignore edit errors
+            }
+          }
+
           // Add delay to avoid API rate limit (1.5 seconds between each day)
           if (day < currentDay) {
             await new Promise(resolve => setTimeout(resolve, 1500));
           }
+        } else {
+          skippedDays++;
+          logger.debug(`Daily sheet ${dateStr} doesn't exist, skipping`);
         }
       }
 
@@ -2285,8 +2309,9 @@ function setupAttendanceHandlers(bot) {
         `✅ Месячный отчёт обновлён успешно!\n\n` +
         `📅 Месяц: ${yearMonth}\n` +
         `📊 Обработано дней: ${processedDays}\n` +
+        `⏭ Пропущено дней: ${skippedDays}\n` +
         `⏰ Время: ${now.format('HH:mm:ss')}\n\n` +
-        `Проверьте Google Sheets!`
+        `Теперь используйте кнопку "📈 Отчёт за месяц" для просмотра!`
       );
 
       logger.info(`Admin ${ctx.from.id} manually updated monthly report with ${processedDays} days of data`);
@@ -3009,25 +3034,64 @@ function setupAttendanceHandlers(bot) {
     try {
       const now = moment.tz(Config.TIMEZONE);
       const yearMonth = now.format('YYYY-MM');
+      const sheetName = `Report_${yearMonth}`;
 
       await ctx.reply(`📊 Формирую месячный отчёт за ${yearMonth}...`);
+      logger.info(`Monthly report requested by admin ${ctx.from.id} for ${yearMonth}`);
 
-      const sheetName = `Report_${yearMonth}`;
-      const worksheet = await sheetsService.getWorksheet(sheetName);
+      // Check if sheet exists
+      let worksheet = sheetsService.doc.sheetsByTitle[sheetName];
+
+      if (!worksheet) {
+        logger.warn(`Monthly report sheet ${sheetName} doesn't exist, creating...`);
+        await ctx.reply(`⚙️ Создаю отчёт за ${yearMonth}...`);
+
+        // Initialize the monthly report sheet
+        await sheetsService.initializeMonthlyReport(yearMonth);
+        worksheet = sheetsService.doc.sheetsByTitle[sheetName];
+
+        if (!worksheet) {
+          throw new Error(`Не удалось создать лист отчёта ${sheetName}`);
+        }
+
+        logger.info(`Monthly report sheet ${sheetName} created successfully`);
+      }
+
+      // Load sheet data
       await worksheet.loadHeaderRow();
       const rows = await worksheet.getRows();
 
+      logger.info(`Monthly report sheet ${sheetName} has ${rows.length} rows`);
+
       if (rows.length === 0) {
-        await ctx.reply('📭 Нет данных за этот месяц.', Keyboards.getMainMenu(ctx.from.id));
+        await ctx.reply(
+          '📭 Отчёт пуст.\n\n' +
+          '💡 Отчёт обновляется автоматически каждый день в 23:55.\n' +
+          'Или используйте команду /updatereport для ручного обновления.',
+          Keyboards.getMainMenu(ctx.from.id)
+        );
         return;
       }
+
+      // Check if data looks valid
+      const firstRow = rows[0];
+      const rating = firstRow.get('Rating (0-10)') || '0';
+      const daysWorked = firstRow.get('Days Worked') || '0';
+
+      logger.info(`Sample data - Rating: ${rating}, Days Worked: ${daysWorked}`);
 
       // Generate report (same as /reportmonthly)
       await generateAndSendMonthlyReport(ctx, yearMonth, now, rows);
 
+      logger.info(`Monthly report sent successfully to admin ${ctx.from.id}`);
+
     } catch (error) {
-      await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
-      logger.error(`Error in monthly report button: ${error.message}`);
+      logger.error(`Error in monthly report button: ${error.message}`, error.stack);
+      await ctx.reply(
+        `❌ Ошибка при формировании отчёта: ${error.message}\n\n` +
+        `Попробуйте команду /updatereport для обновления данных.`,
+        Keyboards.getMainMenu(ctx.from.id)
+      );
     }
   });
 
