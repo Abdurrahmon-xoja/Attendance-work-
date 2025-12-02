@@ -1517,6 +1517,13 @@ class SheetsService {
         return false;
       }
 
+      // ✅ FIX: Check if balance already logged to prevent duplicates
+      const existingBalanceType = employeeRow.get('Day Balance Type') || '';
+      if (existingBalanceType && existingBalanceType.trim() !== '') {
+        logger.info(`Day balance already logged for ${name} today (${existingBalanceType}), skipping duplicate`);
+        return true; // Return success to prevent retries
+      }
+
       // Determine balance type and store it
       let balanceType = '';
       let balanceMinutes = 0;
