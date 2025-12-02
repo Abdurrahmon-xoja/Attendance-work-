@@ -916,14 +916,32 @@ class SchedulerService {
             try {
               const Markup = require('telegraf').Markup;
 
+              // Format the actual end time (including extension if any)
+              const actualEndTime = workEnd.format('HH:mm');
+
+              // Build warning message
+              let warningMessage = `⏰ Напоминание об окончании работы\n\n`;
+
+              if (workExtensionMinutes > 0) {
+                const hours = Math.floor(workExtensionMinutes / 60);
+                const mins = workExtensionMinutes % 60;
+                const extensionText = hours > 0 ? `${hours} ч ${mins} мин` : `${mins} мин`;
+
+                warningMessage += `Ваше плановое время: ${endTime}\n`;
+                warningMessage += `Продление: +${extensionText}\n`;
+                warningMessage += `Текущее окончание работы: ${actualEndTime}\n\n`;
+              } else {
+                warningMessage += `Ваше рабочее время закончилось в ${actualEndTime}.\n`;
+              }
+
+              warningMessage += `Вы не отметили уход.\n\n`;
+              warningMessage += `⚠️ Через ${Config.AUTO_DEPARTURE_WARNING_MINUTES} минут вы будете автоматически отмечены как ушедший.\n\n`;
+              warningMessage += `Что вы хотите сделать?`;
+
               await this.retryTelegramOperation(async () => {
                 await this.bot.telegram.sendMessage(
                   telegramId,
-                  `⏰ Напоминание об окончании работы\n\n` +
-                  `Ваше рабочее время закончилось в ${endTime}.\n` +
-                  `Вы не отметили уход.\n\n` +
-                  `⚠️ Через ${Config.AUTO_DEPARTURE_WARNING_MINUTES} минут вы будете автоматически отмечены как ушедший.\n\n` +
-                  `Что вы хотите сделать?`,
+                  warningMessage,
                   Markup.inlineKeyboard([
                     [
                       Markup.button.callback('✅ Отметить уход сейчас', 'auto_depart_now'),

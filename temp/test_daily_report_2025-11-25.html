@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Дневной отчёт - 2025-11-25</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; min-height: 100vh; }
+    .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
+    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; text-align: center; }
+    .header h1 { font-size: 36px; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
+    .header .date { font-size: 20px; opacity: 0.9; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; padding: 30px; background: #f8f9fa; }
+    .stat-card { background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; transition: transform 0.3s ease; }
+    .stat-card:hover { transform: translateY(-5px); }
+    .stat-card .number { font-size: 36px; font-weight: bold; margin-bottom: 10px; }
+    .stat-card .label { color: #6c757d; font-size: 14px; }
+    .stat-total .number { color: #667eea; }
+    .stat-present .number { color: #10b981; }
+    .stat-late .number { color: #f59e0b; }
+    .stat-absent .number { color: #ef4444; }
+    .stat-early .number { color: #8b5cf6; }
+    .stat-notified .number { color: #3b82f6; }
+    .table-container { padding: 30px; overflow-x: auto; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0 10px; }
+    thead th { background: #667eea; color: white; padding: 15px; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 12px; letter-spacing: 1px; }
+    thead th:first-child { border-radius: 10px 0 0 10px; }
+    thead th:last-child { border-radius: 0 10px 10px 0; }
+    tbody tr { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.05); transition: all 0.3s ease; }
+    tbody tr:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); transform: scale(1.01); }
+    tbody td { padding: 20px 15px; border-top: 1px solid #f1f3f5; border-bottom: 1px solid #f1f3f5; }
+    tbody td:first-child { font-weight: 600; color: #2d3748; border-left: 1px solid #f1f3f5; border-radius: 10px 0 0 10px; }
+    tbody td:last-child { border-right: 1px solid #f1f3f5; border-radius: 0 10px 10px 0; text-align: center; font-weight: bold; font-size: 18px; }
+    .status-ontime { color: #10b981; font-weight: 500; }
+    .status-late { color: #f59e0b; font-weight: 500; }
+    .status-absent { color: #ef4444; font-weight: 500; }
+    .status-notarrived { color: #94a3b8; font-weight: 500; }
+    .status-waiting { color: #3b82f6; font-weight: 500; }
+    .point-good { color: #10b981; }
+    .point-neutral { color: #f59e0b; }
+    .point-bad { color: #ef4444; }
+    .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #6c757d; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📅 Дневной отчёт</h1>
+      <div class="date">2025-11-25 • 12:09:20</div>
+    </div>
+    <div class="stats">
+      <div class="stat-card stat-total"><div class="number">8</div><div class="label">Всего сотрудников</div></div>
+      <div class="stat-card stat-present"><div class="number">5</div><div class="label">Присутствуют</div></div>
+      <div class="stat-card stat-late"><div class="number">2</div><div class="label">Опоздали</div></div>
+      <div class="stat-card stat-notified"><div class="number">3</div><div class="label">Предупредили</div></div>
+      <div class="stat-card stat-absent"><div class="number">1</div><div class="label">Отсутствуют</div></div>
+      <div class="stat-card stat-early"><div class="number">1</div><div class="label">Ушли рано</div></div>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Сотрудник</th><th>Статус</th><th>Баллы</th></tr></thead>
+        <tbody>
+      <tr>
+        <td>Иван Петров</td>
+        <td class="status-ontime">Вовремя (09:00)<br><small>Ушёл: 18:00 (9.00ч)</small></td>
+        <td class="point-good">1.0</td>
+      </tr>
+    
+      <tr>
+        <td>Анна Сидорова</td>
+        <td class="status-late">Опоздал (09:30)<br><small>⏰ Предупредил об опоздании (09:30)</small><br><small>Ушёл: 18:30 (9.00ч)</small></td>
+        <td class="point-bad">-0.5</td>
+      </tr>
+    
+      <tr>
+        <td>Петр Иванов</td>
+        <td class="status-waiting">Ожидается (10:00)</td>
+        <td class="point-neutral">0</td>
+      </tr>
+    
+      <tr>
+        <td>Мария Смирнова</td>
+        <td class="status-ontime">Вовремя (09:00)<br><small>⏰ Предупредил об опоздании (60 минут)</small></td>
+        <td class="point-good">1.0</td>
+      </tr>
+    
+      <tr>
+        <td>Алексей Козлов</td>
+        <td class="status-absent">Отсутствует (Болен)</td>
+        <td class="point-bad">-1.5</td>
+      </tr>
+    
+      <tr>
+        <td>Ольга Новикова</td>
+        <td class="status-ontime">Вовремя (09:00)<br><small>Ушёл: 16:00 (7.00ч) - Рано</small></td>
+        <td class="point-bad">-0.5</td>
+      </tr>
+    
+      <tr>
+        <td>Дмитрий Волков</td>
+        <td class="status-late">Опоздал (09:45)</td>
+        <td class="point-bad">-1.0</td>
+      </tr>
+    
+      <tr>
+        <td>Елена Морозова</td>
+        <td class="status-notarrived">Не пришёл</td>
+        <td class="point-neutral">0</td>
+      </tr>
+    </tbody>
+      </table>
+    </div>
+    <div class="footer">Сгенерировано системой учёта посещаемости • 25.11.2025 12:09:20</div>
+  </div>
+</body>
+</html>
