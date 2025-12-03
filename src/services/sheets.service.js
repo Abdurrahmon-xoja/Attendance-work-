@@ -1813,6 +1813,7 @@ class SheetsService {
 
   /**
    * Update monthly report with data from a specific day
+   * FIX: Now rebuilds from scratch to ensure idempotency (no double-counting)
    * @param {string} dateStr - Date string in YYYY-MM-DD format
    * @returns {boolean} True if successful
    */
@@ -1832,88 +1833,128 @@ class SheetsService {
       await reportSheet.loadHeaderRow();
       const reportRows = await reportSheet.getRows();
 
-      // Get daily attendance sheet
-      const dailySheet = await this.getWorksheet(dateStr);
-      await dailySheet.loadHeaderRow();
-      const dailyRows = await dailySheet.getRows();
+      // FIX: Get ALL daily sheets for this month to recalculate from scratch
+      const startOfMonth = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).startOf('month');
+      const currentDate = moment.tz(dateStr, Config.TIMEZONE);
+      const daysToCheck = currentDate.date();
 
-      // Process each employee
+      // Collect all daily data for the month
+      const dailyDataByEmployee = new Map(); // key: telegramId, value: array of daily records
+
+      for (let day = 1; day <= daysToCheck; day++) {
+        const checkDate = moment.tz(Config.TIMEZONE).year(startOfMonth.year()).month(startOfMonth.month()).date(day);
+        const checkDateStr = checkDate.format('YYYY-MM-DD');
+
+        try {
+          const daySheet = this.doc.sheetsByTitle[checkDateStr];
+          if (!daySheet) continue;
+
+          await daySheet.loadHeaderRow();
+          const dayRows = await daySheet.getRows();
+
+          // Collect data for each employee
+          for (const dayRow of dayRows) {
+            const telegramId = dayRow.get('TelegramId')?.toString().trim();
+            if (!telegramId) continue;
+
+            if (!dailyDataByEmployee.has(telegramId)) {
+              dailyDataByEmployee.set(telegramId, []);
+            }
+
+            dailyDataByEmployee.get(telegramId).push({
+              date: checkDateStr,
+              cameOnTime: dayRow.get('Came on time') || '',
+              whenCome: dayRow.get('When come') || '',
+              leaveTime: dayRow.get('Leave time') || '',
+              hoursWorked: parseFloat(dayRow.get('Hours worked') || '0'),
+              leftEarly: dayRow.get('Left early') || '',
+              willBeLate: dayRow.get('will be late') || '',
+              absent: dayRow.get('Absent') || '',
+              whyAbsent: dayRow.get('Why absent') || '',
+              penaltyMinutes: parseInt(dayRow.get('Penalty minutes') || '0'),
+              point: parseFloat(dayRow.get('Point') || '0'),
+              balanceType: dayRow.get('Day Balance Type') || '',
+              balanceMinutes: parseInt(dayRow.get('Balance Minutes') || '0')
+            });
+          }
+        } catch (dayErr) {
+          // Sheet doesn't exist or error reading it, skip
+          logger.debug(`Skipping day ${checkDateStr}: ${dayErr.message}`);
+          continue;
+        }
+      }
+
+      // Process each employee in monthly report
       for (const reportRow of reportRows) {
         const telegramId = reportRow.get('Telegram ID') || '';
         if (!telegramId) continue;
 
-        // Find employee in daily sheet
-        const dailyRow = dailyRows.find(row =>
-          row.get('TelegramId')?.toString().trim() === telegramId.toString()
-        );
+        // FIX: RECALCULATE from scratch instead of incrementing
+        let totalWorkDays = 0;
+        let daysWorked = 0;
+        let daysAbsent = 0;
+        let daysAbsentNotified = 0;
+        let daysAbsentSilent = 0;
+        let onTimeArrivals = 0;
+        let lateNotified = 0;
+        let lateSilent = 0;
+        let earlyDepartures = 0;
+        let earlyFullHours = 0;
+        let leftBeforeShift = 0;
+        let totalHoursWorked = 0;
+        let totalPenaltyMinutes = 0;
+        let totalPoints = 0;
+        let totalDeficitMinutes = 0;
+        let totalSurplusMinutes = 0;
 
-        if (!dailyRow) continue;
+        // Get all daily data for this employee
+        const employeeDailyData = dailyDataByEmployee.get(telegramId.toString()) || [];
 
-        // Get daily data
-        const cameOnTime = dailyRow.get('Came on time') || '';
-        const whenCome = dailyRow.get('When come') || '';
-        const leaveTime = dailyRow.get('Leave time') || '';
-        const hoursWorked = parseFloat(dailyRow.get('Hours worked') || '0');
-        const leftEarly = dailyRow.get('Left early') || '';
-        const willBeLate = dailyRow.get('will be late') || '';
-        const absent = dailyRow.get('Absent') || '';
-        const whyAbsent = dailyRow.get('Why absent') || '';
-        const penaltyMinutes = parseInt(dailyRow.get('Penalty minutes') || '0');
-        const point = parseFloat(dailyRow.get('Point') || '0');
+        // Calculate totals from all daily records
+        for (const dayData of employeeDailyData) {
+          totalWorkDays++;
 
-        // Get current values from report
-        let totalWorkDays = parseInt(reportRow.get('Total Work Days') || '0');
-        let daysWorked = parseInt(reportRow.get('Days Worked') || '0');
-        let daysAbsent = parseInt(reportRow.get('Days Absent') || '0');
-        let daysAbsentNotified = parseInt(reportRow.get('Days Absent (Notified)') || '0');
-        let daysAbsentSilent = parseInt(reportRow.get('Days Absent (Silent)') || '0');
-        let onTimeArrivals = parseInt(reportRow.get('On Time Arrivals') || '0');
-        let lateNotified = parseInt(reportRow.get('Late Arrivals (Notified)') || '0');
-        let lateSilent = parseInt(reportRow.get('Late Arrivals (Silent)') || '0');
-        let earlyDepartures = parseInt(reportRow.get('Early Departures') || '0');
-        let earlyFullHours = parseInt(reportRow.get('Early Departures (Worked Full Hours)') || '0');
-        let leftBeforeShift = parseInt(reportRow.get('Left Before Shift') || '0');
-        let totalHoursWorked = parseFloat(reportRow.get('Total Hours Worked') || '0');
-        let totalPenaltyMinutes = parseInt(reportRow.get('Total Penalty Minutes') || '0');
-        let totalPoints = parseFloat(reportRow.get('Total Points') || '0');
-
-        // Increment total work days
-        totalWorkDays++;
-
-        // Update statistics based on daily data
-        if (absent.toLowerCase() === 'yes') {
-          daysAbsent++;
-          if (whyAbsent && whyAbsent.trim()) {
-            daysAbsentNotified++;
-          } else {
-            daysAbsentSilent++;
-          }
-        } else if (whenCome.trim()) {
-          daysWorked++;
-          totalHoursWorked += hoursWorked;
-          totalPenaltyMinutes += penaltyMinutes;
-          totalPoints += point;
-
-          if (cameOnTime.toLowerCase() === 'yes') {
-            onTimeArrivals++;
-          } else {
-            if (willBeLate.toLowerCase() === 'yes') {
-              lateNotified++;
+          if (dayData.absent.toLowerCase() === 'yes') {
+            daysAbsent++;
+            if (dayData.whyAbsent && dayData.whyAbsent.trim()) {
+              daysAbsentNotified++;
             } else {
-              lateSilent++;
+              daysAbsentSilent++;
+            }
+          } else if (dayData.whenCome.trim()) {
+            daysWorked++;
+            totalHoursWorked += dayData.hoursWorked;
+            totalPenaltyMinutes += dayData.penaltyMinutes;
+            totalPoints += dayData.point;
+
+            if (dayData.cameOnTime.toLowerCase() === 'yes') {
+              onTimeArrivals++;
+            } else {
+              if (dayData.willBeLate.toLowerCase() === 'yes') {
+                lateNotified++;
+              } else {
+                lateSilent++;
+              }
+            }
+
+            if (dayData.leftEarly.toLowerCase() === 'yes (worked full hours)') {
+              earlyFullHours++;
+            } else if (dayData.leftEarly.toLowerCase() === 'yes') {
+              earlyDepartures++;
+            } else if (dayData.leftEarly.toLowerCase() === 'yes - before shift') {
+              leftBeforeShift++;
             }
           }
 
-          if (leftEarly.toLowerCase() === 'yes (worked full hours)') {
-            earlyFullHours++;
-          } else if (leftEarly.toLowerCase() === 'yes') {
-            earlyDepartures++;
-          } else if (leftEarly.toLowerCase() === 'yes - before shift') {
-            leftBeforeShift++;
+          // Accumulate balance minutes
+          if (dayData.balanceType === 'DEFICIT' && dayData.balanceMinutes < 0) {
+            totalDeficitMinutes += Math.abs(dayData.balanceMinutes);
+          } else if (dayData.balanceType === 'SURPLUS' && dayData.balanceMinutes > 0) {
+            totalSurplusMinutes += dayData.balanceMinutes;
           }
         }
 
-        // Calculate hours required (work days × daily hours)
+        // FIX #2: Calculate hours required based on DAYS WORKED, not total work days
         const workSchedule = reportRow.get('Work Schedule') || '';
         let dailyHours = 8; // Default
         if (workSchedule && workSchedule !== '-') {
@@ -1926,7 +1967,7 @@ class SheetsService {
             // Use default
           }
         }
-        const totalHoursRequired = totalWorkDays * dailyHours;
+        const totalHoursRequired = daysWorked * dailyHours; // FIX: Use daysWorked, not totalWorkDays
         const hoursDeficit = totalHoursRequired - totalHoursWorked;
 
         // Calculate rates
@@ -1948,67 +1989,20 @@ class SheetsService {
           ratingZone = '🔴 Red';
         }
 
-        // Calculate cumulative balance from all daily sheets this month
-        let totalDeficitMinutes = 0;
-        let totalSurplusMinutes = 0;
-
-        try {
-          // Iterate through all days from start of month to current date
-          const startOfMonth = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).startOf('month');
-          const currentDate = moment.tz(dateStr, Config.TIMEZONE);
-          const daysToCheck = currentDate.date();
-
-          for (let day = 1; day <= daysToCheck; day++) {
-            const checkDate = moment.tz(Config.TIMEZONE).year(startOfMonth.year()).month(startOfMonth.month()).date(day);
-            const checkDateStr = checkDate.format('YYYY-MM-DD');
-
-            try {
-              const daySheet = this.doc.sheetsByTitle[checkDateStr];
-              if (!daySheet) continue;
-
-              await daySheet.loadHeaderRow();
-              const dayRows = await daySheet.getRows();
-
-              // Find this employee's row
-              const employeeDayRow = dayRows.find(row =>
-                row.get('TelegramId')?.toString().trim() === telegramId.toString()
-              );
-
-              if (employeeDayRow) {
-                const balanceType = employeeDayRow.get('Day Balance Type') || '';
-                const balanceMinutes = parseInt(employeeDayRow.get('Balance Minutes') || '0');
-
-                if (balanceType === 'DEFICIT' && balanceMinutes < 0) {
-                  totalDeficitMinutes += Math.abs(balanceMinutes);
-                } else if (balanceType === 'SURPLUS' && balanceMinutes > 0) {
-                  totalSurplusMinutes += balanceMinutes;
-                }
-              }
-            } catch (dayErr) {
-              // Sheet doesn't exist or error reading it, skip
-              continue;
-            }
-          }
-        } catch (balanceErr) {
-          logger.error(`Error calculating balance for ${telegramId}: ${balanceErr.message}`);
-        }
-
+        // FIX: Balance minutes already calculated above in the daily data loop
         // Calculate net balance
         const netBalanceMinutes = totalSurplusMinutes - totalDeficitMinutes;
 
-        // Format as hours (e.g., "+5:30" or "-3:45")
-        const absBalance = Math.abs(netBalanceMinutes);
-        const balanceHours = Math.floor(absBalance / 60);
-        const balanceMins = absBalance % 60;
-        const balanceSign = netBalanceMinutes > 0 ? '+' : (netBalanceMinutes < 0 ? '-' : '');
-        const netBalanceFormatted = `${balanceSign}${balanceHours}:${balanceMins.toString().padStart(2, '0')}`;
+        // FIX #3: Convert to numeric hours for Excel (not a formatted string)
+        // Excel will display this with custom formatting [h]:mm
+        const netBalanceHours = netBalanceMinutes / 60; // Convert to decimal hours
 
         // Determine balance status
         let balanceStatus = '⚪ Balanced';
         if (netBalanceMinutes > 60) {
-          balanceStatus = '🟢 In Surplus';
+          balanceStatus = '🟢 Surplus';
         } else if (netBalanceMinutes < -60) {
-          balanceStatus = '🔴 In Deficit';
+          balanceStatus = '🔴 Deficit';
         } else if (netBalanceMinutes > 0) {
           balanceStatus = '🟡 Slight Surplus';
         } else if (netBalanceMinutes < 0) {
@@ -2034,7 +2028,7 @@ class SheetsService {
         reportRow.set('Total Deficit Minutes', totalDeficitMinutes);
         reportRow.set('Total Surplus Minutes', totalSurplusMinutes);
         reportRow.set('Net Balance Minutes', netBalanceMinutes);
-        reportRow.set('Net Balance (Hours)', netBalanceFormatted);
+        reportRow.set('Net Balance (Hours)', netBalanceHours); // FIX: Use numeric value, not formatted string
         reportRow.set('Balance Status', balanceStatus);
         reportRow.set('Total Points', totalPoints.toFixed(2));
         reportRow.set('Average Daily Points', avgDailyPoints);
