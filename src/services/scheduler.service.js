@@ -212,7 +212,7 @@ class SchedulerService {
     // Setup monthly report
     if (Config.AUTO_UPDATE_MONTHLY_REPORT) {
       this.setupMonthlyReportCreation();
-      this.setupDailyReportUpdate();
+      // this.setupDailyReportUpdate(); // DISABLED: This function destroys monthly data by trying to recalculate from all daily sheets (which are deleted). The transferDailyDataToMonthly() at 00:00 properly handles incremental updates.
       logger.info('✅ Monthly report system ENABLED');
     } else {
       logger.info('⚠️  Monthly report system DISABLED');
@@ -938,8 +938,10 @@ class SchedulerService {
               warningMessage += `⚠️ Через ${Config.AUTO_DEPARTURE_WARNING_MINUTES} минут вы будете автоматически отмечены как ушедший.\n\n`;
               warningMessage += `Что вы хотите сделать?`;
 
+              // Send warning and store message ID
+              let sentMessage = null;
               await this.retryTelegramOperation(async () => {
-                await this.bot.telegram.sendMessage(
+                sentMessage = await this.bot.telegram.sendMessage(
                   telegramId,
                   warningMessage,
                   Markup.inlineKeyboard([
@@ -957,6 +959,14 @@ class SchedulerService {
                   ])
                 );
               });
+
+              // Store message ID for later cleanup
+              if (sentMessage) {
+                if (!this._autoDepartureWarningMessages) {
+                  this._autoDepartureWarningMessages = new Map();
+                }
+                this._autoDepartureWarningMessages.set(telegramId, sentMessage.message_id);
+              }
 
               // Mark warning as sent
               row.set('auto_departure_warning_sent', 'true');
@@ -985,6 +995,28 @@ class SchedulerService {
               row.set('Hours worked', hoursWorked.toFixed(2));
 
               await this.retryOperation(async () => await row.save());
+
+              // Remove buttons from warning message if it exists
+              if (this._autoDepartureWarningMessages && this._autoDepartureWarningMessages.has(telegramId)) {
+                const warningMessageId = this._autoDepartureWarningMessages.get(telegramId);
+                try {
+                  // Edit the message to remove buttons and update text
+                  await this.bot.telegram.editMessageText(
+                    telegramId,
+                    warningMessageId,
+                    null,
+                    `⏰ Напоминание об окончании работы\n\n` +
+                    `Ваше рабочее время закончилось.\n` +
+                    `Вы не отметили уход.\n\n` +
+                    `✅ Вы были автоматически отмечены как ушедший в ${departureTime}`
+                  );
+                  logger.info(`Removed buttons from warning message for ${name} (${telegramId})`);
+                } catch (err) {
+                  logger.warn(`Could not edit warning message for ${telegramId}: ${err.message}`);
+                }
+                // Clean up the stored message ID
+                this._autoDepartureWarningMessages.delete(telegramId);
+              }
 
               // Log the auto-departure event
               await sheetsService.logEvent(
@@ -1905,9 +1937,10 @@ class SchedulerService {
         const remainingHours = parseFloat(dailyRow.get('Remaining hours to work') || '0');
 
         // Get required hours for this day from roster
+        // FIXED: Calculate required hours for ALL days, not just days when employee came
         let requiredHoursDaily = 0;
         const workSchedule = monthlyRow.get('Work Schedule') || '';
-        if (workSchedule && whenCome.trim()) {
+        if (workSchedule) {
           // Parse work schedule (e.g., "09:00-18:00")
           const scheduleMatch = workSchedule.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
           if (scheduleMatch) {

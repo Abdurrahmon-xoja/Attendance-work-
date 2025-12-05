@@ -1768,7 +1768,7 @@ function setupAttendanceHandlers(bot) {
       return;
     }
 
-    // Calculate when user can extend (15 min before work end)
+    // Check if user can extend (15 min before work end)
     const extendAllowedTime = workTime.end.clone().subtract(15, 'minutes');
 
     if (now.isBefore(extendAllowedTime)) {
@@ -1827,6 +1827,41 @@ function setupAttendanceHandlers(bot) {
 
     const newEndTime = workTime.end.clone().add(durationMinutes, 'minutes');
     const newEndTimeStr = newEndTime.format('HH:mm');
+
+    // FIX: Update work_extension_minutes in the Google Sheet
+    const now = moment.tz(Config.TIMEZONE);
+    const today = now.format('YYYY-MM-DD');
+
+    try {
+      const worksheet = await sheetsService.getWorksheet(today);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      let employeeRow = null;
+      for (const row of rows) {
+        if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
+          employeeRow = row;
+          break;
+        }
+      }
+
+      if (employeeRow) {
+        // Get current extension and add to it
+        const currentExtension = parseInt(employeeRow.get('work_extension_minutes') || '0');
+        const newExtension = currentExtension + durationMinutes;
+
+        // Update work extension
+        employeeRow.set('work_extension_minutes', newExtension.toString());
+        // Reset warning flags so user gets new warnings based on extended time
+        employeeRow.set('auto_departure_warning_sent', 'false');
+        employeeRow.set('extended_work_reminder_sent', 'false');
+
+        await employeeRow.save();
+        logger.info(`Updated work_extension_minutes for ${user.nameFull}: ${currentExtension} + ${durationMinutes} = ${newExtension}`);
+      }
+    } catch (error) {
+      logger.error(`Error updating work_extension_minutes: ${error.message}`);
+    }
 
     // Log extend event
     await sheetsService.logEvent(
@@ -1900,6 +1935,41 @@ function setupAttendanceHandlers(bot) {
 
         const newEndTime = workTime.end.clone().add(durationMinutes, 'minutes');
         const newEndTimeStr = newEndTime.format('HH:mm');
+
+        // FIX: Update work_extension_minutes in the Google Sheet
+        const now = moment.tz(Config.TIMEZONE);
+        const today = now.format('YYYY-MM-DD');
+
+        try {
+          const worksheet = await sheetsService.getWorksheet(today);
+          await worksheet.loadHeaderRow();
+          const rows = await worksheet.getRows();
+
+          let employeeRow = null;
+          for (const row of rows) {
+            if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
+              employeeRow = row;
+              break;
+            }
+          }
+
+          if (employeeRow) {
+            // Get current extension and add to it
+            const currentExtension = parseInt(employeeRow.get('work_extension_minutes') || '0');
+            const newExtension = currentExtension + durationMinutes;
+
+            // Update work extension
+            employeeRow.set('work_extension_minutes', newExtension.toString());
+            // Reset warning flags so user gets new warnings based on extended time
+            employeeRow.set('auto_departure_warning_sent', 'false');
+            employeeRow.set('extended_work_reminder_sent', 'false');
+
+            await employeeRow.save();
+            logger.info(`Updated work_extension_minutes for ${user.nameFull}: ${currentExtension} + ${durationMinutes} = ${newExtension}`);
+          }
+        } catch (error) {
+          logger.error(`Error updating work_extension_minutes: ${error.message}`);
+        }
 
         // Log extend event
         await sheetsService.logEvent(
