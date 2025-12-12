@@ -319,6 +319,9 @@ class SchedulerService {
         return await roster.getRows();
       });
 
+      // OPTIMIZATION: Collect rows that need updates for batch saving
+      const rowsToUpdate = [];
+
       for (const row of rows) {
         const name = row.get('Name') || '';
         const telegramId = row.get('TelegramId') || '';
@@ -413,7 +416,7 @@ class SchedulerService {
           if (currentMinute === reminder1Time && reminder1Sent.toLowerCase() !== 'true') {
             await this.sendWorkReminder(telegramId, name, 1, reminderTime);
             row.set('reminder_1_sent', 'true');
-            await this.retryOperation(async () => await row.save());
+            rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
             logger.info(`Sent reminder 1 to ${name} (${telegramId}) at ${currentMinute}${isAdjustedTime ? ` - adjusted for late arrival at ${reminderTime}` : ''}`);
             // Add delay to avoid rate limit
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -423,7 +426,7 @@ class SchedulerService {
           if (currentMinute === reminder2Time && reminder2Sent.toLowerCase() !== 'true') {
             await this.sendWorkReminder(telegramId, name, 2, reminderTime);
             row.set('reminder_2_sent', 'true');
-            await this.retryOperation(async () => await row.save());
+            rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
             logger.info(`Sent reminder 2 to ${name} (${telegramId}) at ${currentMinute}${isAdjustedTime ? ` - adjusted for late arrival at ${reminderTime}` : ''}`);
             // Add delay to avoid rate limit
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -433,7 +436,7 @@ class SchedulerService {
           if (currentMinute === reminder3Time && reminder3Sent.toLowerCase() !== 'true') {
             await this.sendWorkReminder(telegramId, name, 3, reminderTime);
             row.set('reminder_3_sent', 'true');
-            await this.retryOperation(async () => await row.save());
+            rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
             logger.info(`Sent reminder 3 to ${name} (${telegramId}) at ${currentMinute}${isAdjustedTime ? ` - adjusted for late arrival at ${reminderTime}` : ''}`);
             // Add delay to avoid rate limit
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -470,7 +473,7 @@ class SchedulerService {
           if (!alreadyMarkedLate && !notifiedLate && !isAbsentNow) {
             // Automatically mark as late (silent - no notification given)
             row.set('Came on time', 'No');
-            await this.retryOperation(async () => await row.save());
+            rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
 
             // Log the silent late event
             const CalculatorService = require('./calculator.service');
@@ -578,7 +581,7 @@ class SchedulerService {
 
             // Mark reminder as sent
             row.set('Temp exit remind sent', 'true');
-            await this.retryOperation(async () => await row.save());
+            rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
 
             logger.info(`Sent temp exit return reminder to ${name} (${telegramId}) - 15 min before ${expectedReturnTime}`);
             // Add delay to avoid rate limit
@@ -718,7 +721,7 @@ class SchedulerService {
 
             // Mark reminder as sent
             row.set('departure_reminder_sent', 'true');
-            await this.retryOperation(async () => await row.save());
+            rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
 
             logger.info(`Sent departure reminder to ${name} (${telegramId}) for ${requiredEndTime}`);
             // Add delay to avoid rate limit and network exhaustion
@@ -832,7 +835,7 @@ class SchedulerService {
 
             // Mark reminder as sent
             row.set('extended_work_reminder_sent', 'true');
-            await this.retryOperation(async () => await row.save());
+            rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
 
             logger.info(`Sent extended work reminder to ${name} (${telegramId}) for ${extendedEndTimeStr} (extension: ${extensionText})`);
             // Add delay to avoid rate limit
@@ -970,7 +973,7 @@ class SchedulerService {
 
               // Mark warning as sent
               row.set('auto_departure_warning_sent', 'true');
-              await this.retryOperation(async () => await row.save());
+              rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
 
               logger.info(`Sent auto-departure warning to ${name} (${telegramId})`);
               await new Promise(resolve => setTimeout(resolve, 1000));
@@ -994,7 +997,7 @@ class SchedulerService {
               const hoursWorked = minutesWorked / 60;
               row.set('Hours worked', hoursWorked.toFixed(2));
 
-              await this.retryOperation(async () => await row.save());
+              rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
 
               // Remove buttons from warning message if it exists
               if (this._autoDepartureWarningMessages && this._autoDepartureWarningMessages.has(telegramId)) {
@@ -1047,6 +1050,13 @@ class SchedulerService {
             }
           }
         }
+      }
+
+      // OPTIMIZATION: Batch save all row updates at once
+      if (rowsToUpdate.length > 0) {
+        logger.info(`Batch saving ${rowsToUpdate.length} row updates...`);
+        await sheetsService.batchSaveRows(rowsToUpdate);
+        logger.info(`Successfully batch saved ${rowsToUpdate.length} rows`);
       }
     } catch (error) {
       logger.error(`Error checking reminders: ${error.message}`);

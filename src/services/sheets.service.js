@@ -16,7 +16,7 @@ class SheetsService {
     // Cache for daily sheets to reduce API calls
     this._dailySheetCache = new Map(); // key: sheetName, value: { worksheet, rows, lastUpdated }
     this._rosterCache = null; // Cache roster data
-    this._cacheTimeout = 120000; // 120 seconds cache validity (increased for concurrent operations)
+    this._cacheTimeout = 300000; // 300 seconds (5 minutes) cache validity - optimized to reduce API calls
     this._pendingInvalidations = new Map(); // Delayed cache invalidation
     this._activeOperations = new Map(); // Track active operations to prevent cache invalidation
     this._initializationLocks = new Map(); // Prevent concurrent sheet initialization
@@ -2341,6 +2341,30 @@ class SheetsService {
         anomalies: [],
         status: ''
       };
+    }
+  }
+
+  /**
+   * Batch save multiple rows in a single API call
+   * OPTIMIZATION: Reduces API calls by batching row updates
+   * @param {Array} rows - Array of row objects to save
+   * @returns {Promise<void>}
+   */
+  async batchSaveRows(rows) {
+    if (!rows || rows.length === 0) {
+      return;
+    }
+
+    try {
+      // Save all rows - google-spreadsheet library will batch them internally
+      await this._retryOperation(async () => {
+        await Promise.all(rows.map(row => row.save()));
+      });
+
+      logger.debug(`Batch saved ${rows.length} rows`);
+    } catch (error) {
+      logger.error(`Error batch saving rows: ${error.message}`);
+      throw error;
     }
   }
 }
