@@ -342,6 +342,10 @@ async function start() {
     await sheetsService.connect();
     logger.info('✅ Google Sheets connected successfully');
 
+    // Pre-warm cache to reduce API quota usage on startup
+    logger.info('Pre-warming cache for today\'s sheet...');
+    await sheetsService.warmupCache();
+
     // Start bot
     logger.info('Starting bot...');
 

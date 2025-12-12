@@ -16,12 +16,13 @@ class SheetsService {
     // Cache for daily sheets to reduce API calls
     this._dailySheetCache = new Map(); // key: sheetName, value: { worksheet, rows, lastUpdated }
     this._rosterCache = null; // Cache roster data
-    this._cacheTimeout = 300000; // 300 seconds (5 minutes) cache validity - optimized to reduce API calls
+    this._cacheTimeout = 900000; // 900 seconds (15 minutes) cache validity - extended to reduce API quota usage
     this._pendingInvalidations = new Map(); // Delayed cache invalidation
     this._activeOperations = new Map(); // Track active operations to prevent cache invalidation
     this._initializationLocks = new Map(); // Prevent concurrent sheet initialization
     // FIX #2 & #3: Cache initialization state to prevent redundant checks
     this._initializedSheets = new Map(); // key: sheetName, value: { initialized: true, timestamp }
+    this._initCacheTimeout = 600000; // 600 seconds (10 minutes) for initialization cache - extended to reduce quota usage
   }
 
   /**
@@ -108,6 +109,32 @@ class SheetsService {
     } catch (error) {
       logger.error(`Failed to connect to Google Sheets: ${error.message}`);
       throw error;
+    }
+  }
+
+  /**
+   * Pre-warm cache on startup to reduce API quota usage
+   * Initializes today's sheet and loads it into cache
+   */
+  async warmupCache() {
+    try {
+      const moment = require('moment-timezone');
+      const today = moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+
+      logger.info(`Warming up cache for today's sheet: ${today}`);
+
+      // Initialize today's sheet and load it into cache
+      await this.initializeDailySheet(today);
+
+      // Pre-load roster into cache
+      await this._getCachedRoster();
+
+      logger.info(`✅ Cache warmed up successfully for ${today}`);
+      return true;
+    } catch (error) {
+      logger.warn(`Failed to warm up cache (non-critical): ${error.message}`);
+      // Don't throw - this is a performance optimization, not critical
+      return false;
     }
   }
 
@@ -435,9 +462,9 @@ class SheetsService {
     try {
       const sheetName = dateStr; // e.g., "2025-10-29"
 
-      // FIX #2 & #3: Check if sheet is already known to be initialized (cache for 2 minutes)
+      // FIX #2 & #3: Check if sheet is already known to be initialized (extended cache to reduce API calls)
       const initCache = this._initializedSheets.get(sheetName);
-      if (initCache && (Date.now() - initCache.timestamp) < 120000) {
+      if (initCache && (Date.now() - initCache.timestamp) < this._initCacheTimeout) {
         logger.debug(`Sheet ${sheetName} already initialized (cached), skipping check`);
         return true;
       }
