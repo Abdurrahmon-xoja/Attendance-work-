@@ -2735,11 +2735,11 @@ function setupAttendanceHandlers(bot) {
         return;
       }
 
-      // Sort by rating (descending)
+      // Sort by total hours worked (descending) - most hours = rank #1
       const sortedRows = rows.sort((a, b) => {
-        const ratingA = parseFloat(a.get('Rating (0-10)') || '0');
-        const ratingB = parseFloat(b.get('Rating (0-10)') || '0');
-        return ratingB - ratingA;
+        const hoursA = parseFloat(a.get('Total Hours Worked') || '0');
+        const hoursB = parseFloat(b.get('Total Hours Worked') || '0');
+        return hoursB - hoursA;
       });
 
       // Build employee rows HTML
@@ -4506,11 +4506,11 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
   const fs = require('fs');
   const path = require('path');
 
-  // Sort by rating (descending)
+  // Sort by total hours worked (descending) - most hours = rank #1
   const sortedRows = rows.sort((a, b) => {
-    const ratingA = parseFloat(a.get('Rating (0-10)') || '0');
-    const ratingB = parseFloat(b.get('Rating (0-10)') || '0');
-    return ratingB - ratingA;
+    const hoursA = parseFloat(a.get('Total Hours Worked') || '0');
+    const hoursB = parseFloat(b.get('Total Hours Worked') || '0');
+    return hoursB - hoursA;
   });
 
   // Build employee rows HTML
