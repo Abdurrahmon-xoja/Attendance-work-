@@ -469,8 +469,14 @@ class SchedulerService {
           const notifiedLate = willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true';
           const isAbsentNow = isAbsent.toLowerCase() === 'yes' || isAbsent.toLowerCase() === 'true';
 
-          // Don't mark late if already marked late, notified, or marked absent (fraud)
-          if (!alreadyMarkedLate && !notifiedLate && !isAbsentNow) {
+          // FIX: Only auto-mark as late if at least one reminder was sent
+          // This prevents marking employees who were just added to the daily sheet but whose work time hasn't arrived yet
+          const hasHadReminders = reminder1Sent.toLowerCase() === 'true' ||
+                                  reminder2Sent.toLowerCase() === 'true' ||
+                                  reminder3Sent.toLowerCase() === 'true';
+
+          // Don't mark late if already marked late, notified, marked absent, OR no reminders sent yet
+          if (!alreadyMarkedLate && !notifiedLate && !isAbsentNow && hasHadReminders) {
             // Automatically mark as late (silent - no notification given)
             row.set('Came on time', 'No');
             rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save

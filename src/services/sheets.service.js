@@ -665,87 +665,19 @@ class SheetsService {
           }
         }
       } else {
-        // Sheet already exists with headers - check for new employees to add
-        logger.info(`Daily sheet ${sheetName} already exists, checking for new employees...`);
+        // Sheet already exists with headers
+        // FIX: Disable auto-sync to prevent repeatedly adding employees throughout the day
+        // The daily sheet is created once at midnight with all employees from the Roster
+        // After that, we should NOT auto-add missing employees, as this causes:
+        // 1. Cache invalidation triggers re-initialization
+        // 2. Re-initialization adds "missing" employees with empty attendance
+        // 3. This creates a cycle where employees are constantly re-added
 
-        // Get existing employee IDs and names in the daily sheet
-        const existingEmployees = new Set();
-        for (const row of existingRows) {
-          const telegramId = (row.get('TelegramId') || '').toString().trim();
-          const name = (row.get('Name') || '').toString().trim();
-          // Track both telegram ID and name to handle employees with and without IDs
-          if (telegramId) {
-            existingEmployees.add(`id:${telegramId}`);
-          }
-          if (name) {
-            existingEmployees.add(`name:${name}`);
-          }
-        }
+        logger.info(`Daily sheet ${sheetName} already exists with ${existingRows.length} employee(s) - skipping auto-sync with Roster`);
 
-        // Find employees from Roster that are NOT in the daily sheet
-        let newEmployeesAdded = 0;
-        for (const row of rosterRows) {
-          const nameFull = row.get('Name full') || '';
-          const telegramId = row.get('Telegram Id') || '';
-
-          // Skip if no name
-          if (!nameFull.trim()) {
-            continue;
-          }
-
-          // Check if this employee is already in the daily sheet
-          const hasId = telegramId && existingEmployees.has(`id:${telegramId.toString().trim()}`);
-          const hasName = existingEmployees.has(`name:${nameFull.trim()}`);
-
-          if (!hasId && !hasName) {
-            // This is a NEW employee not in the daily sheet - add them
-            logger.info(`Adding new employee to ${sheetName}: ${nameFull} (ID: ${telegramId || 'none'})`);
-
-            await worksheet.addRow({
-              'Name': nameFull,
-              'TelegramId': telegramId,
-              'Came on time': '',
-              'When come': '',
-              'Leave time': '',
-              'Hours worked': '',
-              'Remaining hours to work': '',
-              'Left early': '',
-              'Why left early': '',
-              'will be late': '',
-              'will be late will come at': '',
-              'reminder_1_sent': 'false',
-              'reminder_2_sent': 'false',
-              'reminder_3_sent': 'false',
-              'Absent': '',
-              'Why absent': '',
-              'Left temporarily': '',
-              'How long was out': '',
-              'Temp exit time': '',
-              'Temp exit reason': '',
-              'Temp exit duration': '',
-              'Temp exit expected return': '',
-              'Temp exit remind at': '',
-              'Temp exit actual return': '',
-              'Temp exit remind sent': 'false',
-              'Currently out': 'false',
-              'Penalty minutes': '',
-              'Required end time': '',
-              'Point': '',
-              'Location': '',
-              'Location Accuracy': '',
-              'Anomalies Detected': '',
-              'Verification Status': ''
-            });
-
-            newEmployeesAdded++;
-          }
-        }
-
-        if (newEmployeesAdded > 0) {
-          logger.info(`Added ${newEmployeesAdded} new employee(s) to existing daily sheet ${sheetName}`);
-        } else {
-          logger.info(`No new employees to add to ${sheetName}`);
-        }
+        // NOTE: If you need to manually add new employees to an existing daily sheet,
+        // use the admin command: /create_today_sheet
+        // This will trigger a fresh initialization with Roster sync
       }
 
         // FIX #2 & #3: Mark sheet as initialized in cache
