@@ -297,26 +297,15 @@ class SchedulerService {
         return;
       }
 
-      // Get today's attendance sheet with retry logic
-      const worksheet = await this.retryOperation(async () => {
-        const ws = await sheetsService.getWorksheet(today);
-        await ws.loadHeaderRow();
-        return ws;
+      // OPTIMIZATION: Use cached methods to reduce API calls
+      // This runs every 5 minutes, so caching is critical
+      const { worksheet, rows } = await this.retryOperation(async () => {
+        return await sheetsService._getCachedDailySheet(today);
       });
 
-      const rows = await this.retryOperation(async () => {
-        return await worksheet.getRows();
-      });
-
-      // Get roster to check work times with retry logic
-      const roster = await this.retryOperation(async () => {
-        const r = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
-        await r.loadHeaderRow();
-        return r;
-      });
-
+      // OPTIMIZATION: Use cached roster data instead of loading every time
       const rosterRows = await this.retryOperation(async () => {
-        return await roster.getRows();
+        return await sheetsService._getCachedRoster(true); // Build index for faster lookups
       });
 
       // OPTIMIZATION: Collect rows that need updates for batch saving

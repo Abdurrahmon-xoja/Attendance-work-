@@ -16,13 +16,16 @@ class SheetsService {
     // Cache for daily sheets to reduce API calls
     this._dailySheetCache = new Map(); // key: sheetName, value: { worksheet, rows, lastUpdated }
     this._rosterCache = null; // Cache roster data
-    this._cacheTimeout = 900000; // 900 seconds (15 minutes) cache validity - extended to reduce API quota usage
+    this._cacheTimeout = 1800000; // 1800 seconds (30 minutes) cache validity - increased to reduce API quota usage
     this._pendingInvalidations = new Map(); // Delayed cache invalidation
     this._activeOperations = new Map(); // Track active operations to prevent cache invalidation
     this._initializationLocks = new Map(); // Prevent concurrent sheet initialization
     // FIX #2 & #3: Cache initialization state to prevent redundant checks
     this._initializedSheets = new Map(); // key: sheetName, value: { initialized: true, timestamp }
-    this._initCacheTimeout = 600000; // 600 seconds (10 minutes) for initialization cache - extended to reduce quota usage
+    this._initCacheTimeout = 1800000; // 1800 seconds (30 minutes) for initialization cache - increased to reduce quota usage
+    // OPTIMIZATION: Field-specific caches for frequently accessed data
+    this._rosterByTelegramIdCache = new Map(); // key: telegramId, value: { employee data, lastUpdated }
+    this._dailyRowCache = new Map(); // key: `${sheetName}:${telegramId}`, value: { row, lastUpdated }
   }
 
   /**
@@ -114,6 +117,7 @@ class SheetsService {
 
   /**
    * Pre-warm cache on startup to reduce API quota usage
+   * OPTIMIZATION: Now also builds telegram ID indexes
    * Initializes today's sheet and loads it into cache
    */
   async warmupCache() {
@@ -126,8 +130,25 @@ class SheetsService {
       // Initialize today's sheet and load it into cache
       await this.initializeDailySheet(today);
 
-      // Pre-load roster into cache
-      await this._getCachedRoster();
+      // OPTIMIZATION: Pre-load roster into cache and build telegram ID index
+      await this._getCachedRoster(true);
+      logger.info(`✅ Roster cache built with ${this._rosterByTelegramIdCache.size} indexed employees`);
+
+      // OPTIMIZATION: Pre-build daily sheet telegram ID index
+      const { rows } = await this._getCachedDailySheet(today);
+      let dailyIndexCount = 0;
+      for (const row of rows) {
+        const tid = row.get('TelegramId');
+        if (tid && tid.toString().trim()) {
+          const key = `${today}:${tid.toString().trim()}`;
+          this._dailyRowCache.set(key, {
+            row,
+            lastUpdated: Date.now()
+          });
+          dailyIndexCount++;
+        }
+      }
+      logger.info(`✅ Daily sheet cache built with ${dailyIndexCount} indexed rows`);
 
       logger.info(`✅ Cache warmed up successfully for ${today}`);
       return true;
@@ -140,6 +161,7 @@ class SheetsService {
 
   /**
    * Invalidate cache for a specific sheet or all sheets (with delay to batch multiple writes)
+   * OPTIMIZATION: Also clears indexed caches
    * @param {string} sheetName - Optional sheet name to invalidate (or all if not provided)
    */
   _invalidateCache(sheetName = null) {
@@ -162,7 +184,20 @@ class SheetsService {
         // Double-check no active operations before invalidating
         const stillActiveOps = this._activeOperations.get(sheetName) || 0;
         if (stillActiveOps === 0) {
-          this._dailySheetCache.delete(sheetName);
+          // Clear sheet cache (including all limit variations)
+          for (const key of this._dailySheetCache.keys()) {
+            if (key.startsWith(sheetName)) {
+              this._dailySheetCache.delete(key);
+            }
+          }
+
+          // OPTIMIZATION: Clear daily row cache for this sheet
+          for (const key of this._dailyRowCache.keys()) {
+            if (key.startsWith(`${sheetName}:`)) {
+              this._dailyRowCache.delete(key);
+            }
+          }
+
           // FIX #2 & #3: Also clear initialization cache for this sheet
           this._initializedSheets.delete(sheetName);
           this._pendingInvalidations.delete(sheetName);
@@ -177,6 +212,8 @@ class SheetsService {
       // Immediate full invalidation
       this._dailySheetCache.clear();
       this._rosterCache = null;
+      this._rosterByTelegramIdCache.clear(); // OPTIMIZATION: Clear roster index
+      this._dailyRowCache.clear(); // OPTIMIZATION: Clear daily row cache
       // FIX #2 & #3: Also clear initialization cache
       this._initializedSheets.clear();
       logger.debug('All cache invalidated');
@@ -194,11 +231,14 @@ class SheetsService {
 
   /**
    * Get cached daily sheet rows or fetch from API if not cached
+   * OPTIMIZATION: Added field filtering to reduce data transfer
    * @param {string} sheetName - Sheet name
+   * @param {Object} options - Options for getRows (limit, offset)
    * @returns {Object} { worksheet, rows }
    */
-  async _getCachedDailySheet(sheetName) {
-    const cached = this._dailySheetCache.get(sheetName);
+  async _getCachedDailySheet(sheetName, options = {}) {
+    const cacheKey = sheetName + (options.limit ? `:limit${options.limit}` : '');
+    const cached = this._dailySheetCache.get(cacheKey);
 
     if (cached && this._isCacheValid(cached.lastUpdated)) {
       logger.debug(`Using cached data for sheet: ${sheetName}`);
@@ -206,7 +246,7 @@ class SheetsService {
     }
 
     // Cache miss or expired - fetch from API with retry logic
-    logger.debug(`Fetching fresh data for sheet: ${sheetName}`);
+    logger.debug(`Fetching fresh data for sheet: ${sheetName}${options.limit ? ` (limit: ${options.limit})` : ''}`);
 
     const worksheet = await this._retryOperation(async () => {
       const ws = await this.getWorksheet(sheetName);
@@ -215,11 +255,12 @@ class SheetsService {
     });
 
     const rows = await this._retryOperation(async () => {
-      return await worksheet.getRows();
+      // OPTIMIZATION: Use options to limit rows fetched
+      return await worksheet.getRows(options);
     });
 
     // Update cache
-    this._dailySheetCache.set(sheetName, {
+    this._dailySheetCache.set(cacheKey, {
       worksheet,
       rows,
       lastUpdated: Date.now()
@@ -230,9 +271,11 @@ class SheetsService {
 
   /**
    * Get cached roster data or fetch from API if not cached
+   * OPTIMIZATION: Added option to build telegram ID index
+   * @param {boolean} buildIndex - Whether to build telegram ID index for faster lookups
    * @returns {Array} Roster rows
    */
-  async _getCachedRoster() {
+  async _getCachedRoster(buildIndex = false) {
     if (this._rosterCache && this._isCacheValid(this._rosterCache.lastUpdated)) {
       logger.debug('Using cached roster data');
       return this._rosterCache.rows;
@@ -242,7 +285,9 @@ class SheetsService {
     logger.debug('Fetching fresh roster data');
     const roster = await this.getWorksheet(Config.SHEET_ROSTER);
     await roster.loadHeaderRow();
-    const rows = await roster.getRows();
+    const rows = await this._retryOperation(async () => {
+      return await roster.getRows();
+    });
 
     // Update cache
     this._rosterCache = {
@@ -250,7 +295,84 @@ class SheetsService {
       lastUpdated: Date.now()
     };
 
+    // OPTIMIZATION: Build telegram ID index if requested
+    if (buildIndex) {
+      for (const row of rows) {
+        const telegramId = row.get('Telegram Id');
+        if (telegramId && telegramId.toString().trim()) {
+          this._rosterByTelegramIdCache.set(telegramId.toString().trim(), {
+            data: {
+              name: row.get('Name'),
+              telegramId: telegramId,
+              workTime: row.get('Work time'),
+              role: row.get('Role'),
+              doNotWorkSaturday: row.get('Do not work Saturday')?.toLowerCase() === 'yes'
+            },
+            lastUpdated: Date.now()
+          });
+        }
+      }
+      logger.debug(`Built roster index with ${this._rosterByTelegramIdCache.size} entries`);
+    }
+
     return rows;
+  }
+
+  /**
+   * OPTIMIZATION: Get employee from roster by telegram ID using cache
+   * This avoids loading all roster rows for single employee lookups
+   * @param {string} telegramId - Telegram ID to find
+   * @returns {Object|null} Employee data or null
+   */
+  async _getCachedEmployeeByTelegramId(telegramId) {
+    const cached = this._rosterByTelegramIdCache.get(telegramId.toString().trim());
+
+    if (cached && this._isCacheValid(cached.lastUpdated)) {
+      logger.debug(`Using cached employee data for telegram ID: ${telegramId}`);
+      return cached.data;
+    }
+
+    // Cache miss - load roster and build index
+    const rows = await this._getCachedRoster(true);
+
+    // Try again after building index
+    const nowCached = this._rosterByTelegramIdCache.get(telegramId.toString().trim());
+    return nowCached ? nowCached.data : null;
+  }
+
+  /**
+   * OPTIMIZATION: Get daily row by telegram ID using cache
+   * @param {string} sheetName - Sheet name
+   * @param {string} telegramId - Telegram ID to find
+   * @returns {Object|null} Row object or null
+   */
+  async _getCachedDailyRow(sheetName, telegramId) {
+    const cacheKey = `${sheetName}:${telegramId}`;
+    const cached = this._dailyRowCache.get(cacheKey);
+
+    if (cached && this._isCacheValid(cached.lastUpdated)) {
+      logger.debug(`Using cached daily row for ${sheetName}:${telegramId}`);
+      return cached.row;
+    }
+
+    // Cache miss - load all rows and build cache
+    const { rows } = await this._getCachedDailySheet(sheetName);
+
+    // Build cache for all telegram IDs in this sheet
+    for (const row of rows) {
+      const tid = row.get('TelegramId');
+      if (tid && tid.toString().trim()) {
+        const key = `${sheetName}:${tid.toString().trim()}`;
+        this._dailyRowCache.set(key, {
+          row,
+          lastUpdated: Date.now()
+        });
+      }
+    }
+
+    // Return the requested row
+    const nowCached = this._dailyRowCache.get(cacheKey);
+    return nowCached ? nowCached.row : null;
   }
 
   /**
@@ -283,8 +405,32 @@ class SheetsService {
    */
   async findEmployeeByTelegramId(telegramId) {
     try {
-      // Use cached roster data to reduce API calls
-      const rows = await this._getCachedRoster();
+      // OPTIMIZATION: Try indexed cache first (much faster than looping)
+      const cachedEmployee = await this._getCachedEmployeeByTelegramId(telegramId);
+      if (cachedEmployee) {
+        // Found in cache - still need to get full row for _row property
+        const rows = await this._getCachedRoster();
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          if (row.get('Telegram Id')?.toString().trim() === telegramId.toString()) {
+            const doNotWorkSaturday = (row.get('Do not work in Saturday') || '').toString().toLowerCase().trim();
+            return {
+              rowNumber: i + 2, // +2 because header is row 1, and index starts at 0
+              nameFull: row.get('Name full') || '',
+              workTime: row.get('Work time') || '',
+              telegramName: row.get('Telegram name') || '',
+              company: row.get('Company') || '',
+              telegramUsername: row.get('Telegram user name') || '',
+              telegramId: row.get('Telegram Id') || '',
+              doNotWorkSaturday: doNotWorkSaturday === 'yes',
+              _row: row
+            };
+          }
+        }
+      }
+
+      // Fallback: Load full roster and search (cache will be built)
+      const rows = await this._getCachedRoster(true);
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -491,6 +637,8 @@ class SheetsService {
       // Multi-level check for existing data to prevent accidental re-initialization
       let hasHeaders = false;
       let existingRows = [];
+      let headerCheckFailed = false;
+      let dataCheckFailed = false;
 
       // Try to load headers
       try {
@@ -505,6 +653,18 @@ class SheetsService {
         logger.info(`Sheet ${sheetName} state check: hasHeaders=${hasHeaders}, existingRows=${existingRows.length}, headerValues=${headerValues.length}`);
       } catch (err) {
         logger.warn(`Header detection error for ${sheetName}: ${err.message}`);
+
+        // CRITICAL FIX: Check if this is a quota error
+        const isQuotaError = err.message && (
+          err.message.includes('429') ||
+          err.message.includes('Quota exceeded') ||
+          err.message.includes('quota metric')
+        );
+
+        if (isQuotaError) {
+          headerCheckFailed = true;
+        }
+
         hasHeaders = false;
       }
 
@@ -526,7 +686,33 @@ class SheetsService {
           }
         } catch (err) {
           logger.warn(`Could not check for actual data: ${err.message}`);
+
+          // CRITICAL FIX: Check if this is a quota error
+          const isQuotaError = err.message && (
+            err.message.includes('429') ||
+            err.message.includes('Quota exceeded') ||
+            err.message.includes('quota metric')
+          );
+
+          if (isQuotaError) {
+            dataCheckFailed = true;
+          }
         }
+      }
+
+      // CRITICAL FIX: If BOTH checks failed due to quota errors, DO NOT PROCEED
+      // Treat this as "sheet state unknown" and assume it exists to prevent duplicates
+      if (headerCheckFailed && dataCheckFailed) {
+        logger.error(`🚨 CRITICAL: Cannot verify sheet ${sheetName} state due to quota errors - ABORTING initialization to prevent duplicates`);
+        logger.info(`Sheet ${sheetName} treated as existing due to quota errors - will retry on next operation`);
+
+        // Mark as initialized in cache to prevent repeated attempts
+        this._initializedSheets.set(sheetName, {
+          initialized: true,
+          timestamp: Date.now()
+        });
+
+        return false; // Return false to indicate initialization was skipped
       }
 
       // CRITICAL SAFETY CHECK: If sheet has actual cell values but headers not detected,
