@@ -730,10 +730,8 @@ class SheetsService {
         }
       }
 
-      // Get all employees from Worker info sheet
-      const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-      await roster.loadHeaderRow();
-      const rosterRows = await roster.getRows();
+      // OPTIMIZATION: Get all employees from cached roster
+      const rosterRows = await this._getCachedRoster();
 
       // If headers don't exist, initialize the sheet
       if (!hasHeaders) {
@@ -951,10 +949,8 @@ class SheetsService {
         // Determine if came on time by checking work time
         let cameOnTime = 'Yes';
         try {
-          // Get employee info from roster to get work time
-          const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-          await roster.loadHeaderRow();
-          const rosterRows = await roster.getRows();
+          // OPTIMIZATION: Use cached roster instead of direct API call
+          const rosterRows = await this._getCachedRoster();
 
           let workTime = null;
           for (const rosterRow of rosterRows) {
@@ -1000,10 +996,8 @@ class SheetsService {
         } else {
           // Came late - calculate lateness and penalty
           try {
-            // Get employee info from roster to get work time
-            const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-            await roster.loadHeaderRow();
-            const rosterRows = await roster.getRows();
+            // OPTIMIZATION: Use cached roster instead of direct API call
+            const rosterRows = await this._getCachedRoster();
 
             let workTime = null;
             for (const rosterRow of rosterRows) {
@@ -1108,9 +1102,8 @@ class SheetsService {
         let workEndTime = null;
 
         try {
-          const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-          await roster.loadHeaderRow();
-          const rosterRows = await roster.getRows();
+          // OPTIMIZATION: Get employee work time from cached roster
+          const rosterRows = await this._getCachedRoster();
 
           let workTime = null;
           for (const rosterRow of rosterRows) {
@@ -1210,9 +1203,8 @@ class SheetsService {
         } else {
           // No penalty - use normal work end time from roster
           try {
-            const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-            await roster.loadHeaderRow();
-            const rosterRows = await roster.getRows();
+            // OPTIMIZATION: Get work time from cached roster
+            const rosterRows = await this._getCachedRoster();
 
             let workTime = null;
             for (const rosterRow of rosterRows) {
