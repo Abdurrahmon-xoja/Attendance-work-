@@ -470,9 +470,8 @@ class SheetsService {
         username = `@${username}`;
       }
 
-      const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-      await roster.loadHeaderRow();
-      const rows = await roster.getRows();
+      // OPTIMIZATION: Use cached roster
+      const rows = await this._getCachedRoster();
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -508,9 +507,8 @@ class SheetsService {
     try {
       if (!firstName) return null;
 
-      const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-      await roster.loadHeaderRow();
-      const rows = await roster.getRows();
+      // OPTIMIZATION: Use cached roster
+      const rows = await this._getCachedRoster();
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -547,9 +545,8 @@ class SheetsService {
    */
   async getUnregisteredEmployees() {
     try {
-      const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-      await roster.loadHeaderRow();
-      const rows = await roster.getRows();
+      // OPTIMIZATION: Use cached roster
+      const rows = await this._getCachedRoster();
 
       const unregistered = [];
       for (let i = 0; i < rows.length; i++) {
@@ -1891,10 +1888,8 @@ class SheetsService {
       ]);
       await worksheet.loadHeaderRow();
 
-      // Get all employees from roster
-      const roster = await this.getWorksheet(Config.SHEET_ROSTER);
-      await roster.loadHeaderRow();
-      const rows = await roster.getRows();
+      // OPTIMIZATION: Get all employees from cached roster
+      const rows = await this._getCachedRoster();
 
       // Add all employees to monthly report
       for (const row of rows) {
