@@ -9,6 +9,7 @@ const CalculatorService = require('../../services/calculator.service');
 const Keyboards = require('../keyboards/buttons');
 const Config = require('../../config');
 const logger = require('../../utils/logger');
+const { sendBusyNotification } = require('../../utils/messageHelper');
 
 // Create wizard scene for registration
 const registrationWizard = new Scenes.WizardScene(
@@ -174,14 +175,15 @@ async function notifyAdminsAboutUnknownUser(ctx) {
 function setupRegistrationHandlers(bot) {
   // /start command
   bot.command('start', async (ctx) => {
-    const telegramId = ctx.from.id;
-    const username = ctx.from.username;
-    const displayName = `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim();
+    try {
+      const telegramId = ctx.from.id;
+      const username = ctx.from.username;
+      const displayName = `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim();
 
-    logger.info(`Registration attempt: telegram_id=${telegramId}, username=${username}, display=${displayName}`);
+      logger.info(`Registration attempt: telegram_id=${telegramId}, username=${username}, display=${displayName}`);
 
-    // Step 1: Check if already registered
-    const employee = await sheetsService.findEmployeeByTelegramId(telegramId);
+      // Step 1: Check if already registered
+      const employee = await sheetsService.findEmployeeByTelegramId(telegramId);
     if (employee) {
       // Check if admin
       const Config = require('../../config');
@@ -302,8 +304,22 @@ function setupRegistrationHandlers(bot) {
       return;
     }
 
-    // Enter registration wizard
-    ctx.scene.enter('registration', { unregistered });
+      // Enter registration wizard
+      ctx.scene.enter('registration', { unregistered });
+    } catch (error) {
+      // Handle quota errors with a friendly message
+      if (error.isQuotaError) {
+        await sendBusyNotification(
+          ctx,
+          '⏳ В данный момент система перегружена, много сотрудников используют бот.\n\n' +
+          'Пожалуйста, попробуйте команду /start снова через несколько секунд.'
+        );
+        return;
+      }
+
+      // Re-throw other errors
+      throw error;
+    }
   });
 
   // Handle auto-registration confirmation (by username)

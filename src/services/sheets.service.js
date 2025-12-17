@@ -451,6 +451,22 @@ class SheetsService {
       }
       return null;
     } catch (error) {
+      // Check if it's a quota error - throw it so caller can handle appropriately
+      const isQuotaError = error.message && (
+        error.message.includes('429') ||
+        error.message.includes('Quota exceeded') ||
+        error.message.includes('quota metric')
+      );
+
+      if (isQuotaError) {
+        logger.warn(`Quota error while finding employee by telegram_id: ${error.message}`);
+        // Create a special error to indicate quota issue
+        const quotaError = new Error('QUOTA_EXCEEDED');
+        quotaError.isQuotaError = true;
+        quotaError.originalError = error;
+        throw quotaError;
+      }
+
       logger.error(`Error finding employee by telegram_id: ${error.message}`);
       return null;
     }

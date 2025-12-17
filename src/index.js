@@ -13,6 +13,7 @@ const locationTrackerService = require('./services/locationTracker.service');
 const anomalyDetectorService = require('./services/anomalyDetector.service');
 const { registrationWizard, setupRegistrationHandlers } = require('./bot/handlers/registration.handler');
 const { setupAttendanceHandlers } = require('./bot/handlers/attendance.handler');
+const { sendBusyNotification } = require('./utils/messageHelper');
 
 // Initialize bot
 const bot = new Telegraf(Config.BOT_TOKEN);
@@ -49,6 +50,20 @@ bot.catch((err, ctx) => {
 // Setup handlers
 setupRegistrationHandlers(bot);
 setupAttendanceHandlers(bot);
+
+// Admin command to test busy gif
+bot.command('testgif', async (ctx) => {
+  const telegramId = ctx.from.id;
+
+  // Check if user is admin
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+
+  logger.info(`Admin ${telegramId} testing busy gif`);
+  await sendBusyNotification(ctx, 'Тестовое сообщение с гифкой от администратора 🎬');
+});
 
 // Live Location Handler - processes location updates during tracking
 const handleLocationUpdate = async (ctx) => {

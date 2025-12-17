@@ -12,6 +12,7 @@ const anomalyDetectorService = require('../../services/anomalyDetector.service')
 const Keyboards = require('../keyboards/buttons');
 const Config = require('../../config');
 const logger = require('../../utils/logger');
+const { sendBusyNotification } = require('../../utils/messageHelper');
 
 // Temporary state: users awaiting location for check-in
 // Map<userId, { requestTime, user, checkInData }>
@@ -26,17 +27,29 @@ const awaitingLocationForCheckout = new Map();
  */
 async function getUserOrPromptRegistration(ctx) {
   const telegramId = ctx.from.id;
-  const user = await sheetsService.findEmployeeByTelegramId(telegramId);
 
-  if (!user) {
-    await ctx.reply(
-      '❌ К сожалению, Вы не зарегистрированы в системе.\n' +
-      'Пожалуйста, используйте команду /start для регистрации.'
-    );
-    return null;
+  try {
+    const user = await sheetsService.findEmployeeByTelegramId(telegramId);
+
+    if (!user) {
+      await ctx.reply(
+        '❌ К сожалению, Вы не зарегистрированы в системе.\n' +
+        'Пожалуйста, используйте команду /start для регистрации.'
+      );
+      return null;
+    }
+
+    return user;
+  } catch (error) {
+    // Handle quota errors with a friendly message
+    if (error.isQuotaError) {
+      await sendBusyNotification(ctx);
+      return null;
+    }
+
+    // Re-throw other errors
+    throw error;
   }
-
-  return user;
 }
 
 /**
