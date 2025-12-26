@@ -241,7 +241,16 @@ class SchedulerService {
     // Run at 00:01 every day (1 minute after midnight)
     const job = cron.schedule('1 0 * * *', async () => {
       try {
-        const today = moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+        const now = moment.tz(Config.TIMEZONE);
+        const today = now.format('YYYY-MM-DD');
+        const isSunday = now.day() === 0;
+
+        // Skip creating sheet on Sunday (nobody works on Sunday)
+        if (isSunday) {
+          logger.info(`Skipping daily sheet creation for ${today} (Sunday - day off for everyone)`);
+          return;
+        }
+
         logger.info(`Creating daily sheet for ${today}`);
 
         await sheetsService.initializeDailySheet(today);

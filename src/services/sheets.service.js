@@ -1913,14 +1913,50 @@ class SheetsService {
         const telegramId = row.get('Telegram Id') || '';
         const company = row.get('Company') || '';
         const workTime = row.get('Work time') || '';
+        const doNotWorkSaturday = (row.get('Do not work in Saturday') || '').toString().toLowerCase().trim() === 'yes';
 
         if (nameFull.trim()) {
+          // Calculate Total Work Days for this employee based on calendar and schedule
+          let totalWorkDays = 0;
+          const monthStart = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).startOf('month');
+          const monthEnd = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).endOf('month');
+
+          // Loop through each day in the month to count work days
+          for (let day = monthStart.clone(); day.isSameOrBefore(monthEnd); day.add(1, 'day')) {
+            const dayOfWeek = day.day();
+            const isSunday = dayOfWeek === 0;
+            const isSaturday = dayOfWeek === 6;
+
+            // Skip Sunday for everyone
+            if (isSunday) continue;
+
+            // Skip Saturday if user doesn't work on Saturday
+            if (isSaturday && doNotWorkSaturday) continue;
+
+            // This is a work day for this employee
+            totalWorkDays++;
+          }
+
+          // Calculate Total Hours Required based on work schedule
+          let dailyHours = 8; // Default
+          if (workTime && workTime !== '-') {
+            try {
+              const times = workTime.split('-');
+              const [startHour, startMin] = times[0].trim().split(':').map(Number);
+              const [endHour, endMin] = times[1].trim().split(':').map(Number);
+              dailyHours = (endHour + endMin/60) - (startHour + startMin/60);
+            } catch (err) {
+              // Use default 8 hours
+            }
+          }
+          const totalHoursRequired = totalWorkDays * dailyHours;
+
           await worksheet.addRow({
             'Name': nameFull,
             'Telegram ID': telegramId,
             'Company': company,
             'Work Schedule': workTime,
-            'Total Work Days': 0,
+            'Total Work Days': totalWorkDays,
             'Days Worked': 0,
             'Days Absent': 0,
             'Days Absent (Notified)': 0,
@@ -1931,7 +1967,7 @@ class SheetsService {
             'Early Departures': 0,
             'Early Departures (Worked Full Hours)': 0,
             'Left Before Shift': 0,
-            'Total Hours Required': 0,
+            'Total Hours Required': totalHoursRequired.toFixed(2),
             'Total Hours Worked': 0,
             'Hours Deficit/Surplus': 0,
             'Total Penalty Minutes': 0,
@@ -2038,7 +2074,6 @@ class SheetsService {
         if (!telegramId) continue;
 
         // FIX: RECALCULATE from scratch instead of incrementing
-        let totalWorkDays = 0;
         let daysWorked = 0;
         let daysAbsent = 0;
         let daysAbsentNotified = 0;
@@ -2055,21 +2090,47 @@ class SheetsService {
         let totalDeficitMinutes = 0;
         let totalSurplusMinutes = 0;
 
+        // Get employee's Saturday work status for filtering weekend data
+        const employee = await this.findEmployeeByTelegramId(telegramId);
+        const userDoesNotWorkSaturday = employee?.doNotWorkSaturday || false;
+
+        // Read Total Work Days from the report (already calculated when sheet was created)
+        const totalWorkDays = parseInt(reportRow.get('Total Work Days') || '0');
+
         // Get all daily data for this employee
         const employeeDailyData = dailyDataByEmployee.get(telegramId.toString()) || [];
 
         // Calculate totals from all daily records
         for (const dayData of employeeDailyData) {
-          totalWorkDays++;
+          // Check if this day is a weekend - skip it for stats
+          const dayDate = moment.tz(dayData.date, Config.TIMEZONE);
+          const isSunday = dayDate.day() === 0;
+          const isSaturday = dayDate.day() === 6;
+
+          // Skip Sunday for everyone
+          if (isSunday) {
+            continue;
+          }
+
+          // Skip Saturday if user doesn't work on Saturday
+          if (isSaturday && userDoesNotWorkSaturday) {
+            continue;
+          }
+
+          // This is a valid work day - process the data
 
           if (dayData.absent.toLowerCase() === 'yes') {
+            // Marked as absent
             daysAbsent++;
-            if (dayData.whyAbsent && dayData.whyAbsent.trim()) {
-              daysAbsentNotified++;
+            // Check if this is a no-show (automated) vs user-provided reason
+            const isNoShow = dayData.whyAbsent && dayData.whyAbsent.toLowerCase().includes('no-show');
+            if (dayData.whyAbsent && dayData.whyAbsent.trim() && !isNoShow) {
+              daysAbsentNotified++;  // User provided a reason
             } else {
-              daysAbsentSilent++;
+              daysAbsentSilent++;    // No reason OR no-show (silent absence)
             }
           } else if (dayData.whenCome.trim()) {
+            // Came to work
             daysWorked++;
             totalHoursWorked += dayData.hoursWorked;
             totalPenaltyMinutes += dayData.penaltyMinutes;
@@ -2092,6 +2153,12 @@ class SheetsService {
             } else if (dayData.leftEarly.toLowerCase() === 'yes - before shift') {
               leftBeforeShift++;
             }
+          } else {
+            // FIX: No activity at all (not marked absent, no arrival)
+            // This shouldn't happen if no-show checker runs, but handle it as silent absence
+            daysAbsent++;
+            daysAbsentSilent++;
+            logger.warn(`Employee has no activity on work day ${dayData.date} but not marked as absent - counting as silent absence`);
           }
 
           // Accumulate balance minutes
@@ -2102,20 +2169,8 @@ class SheetsService {
           }
         }
 
-        // FIX #2: Calculate hours required based on DAYS WORKED, not total work days
-        const workSchedule = reportRow.get('Work Schedule') || '';
-        let dailyHours = 8; // Default
-        if (workSchedule && workSchedule !== '-') {
-          try {
-            const times = workSchedule.split('-');
-            const [startHour, startMin] = times[0].trim().split(':').map(Number);
-            const [endHour, endMin] = times[1].trim().split(':').map(Number);
-            dailyHours = (endHour + endMin/60) - (startHour + startMin/60);
-          } catch (err) {
-            // Use default
-          }
-        }
-        const totalHoursRequired = daysWorked * dailyHours; // FIX: Use daysWorked, not totalWorkDays
+        // Read Total Hours Required from the report (already calculated when sheet was created)
+        const totalHoursRequired = parseFloat(reportRow.get('Total Hours Required') || '0');
         const hoursDeficit = totalHoursRequired - totalHoursWorked;
 
         // Calculate rates
@@ -2157,8 +2212,7 @@ class SheetsService {
           balanceStatus = '🟡 Slight Deficit';
         }
 
-        // Update report row
-        reportRow.set('Total Work Days', totalWorkDays);
+        // Update report row (don't update Total Work Days and Total Hours Required - they're set at creation)
         reportRow.set('Days Worked', daysWorked);
         reportRow.set('Days Absent', daysAbsent);
         reportRow.set('Days Absent (Notified)', daysAbsentNotified);
@@ -2169,7 +2223,6 @@ class SheetsService {
         reportRow.set('Early Departures', earlyDepartures);
         reportRow.set('Early Departures (Worked Full Hours)', earlyFullHours);
         reportRow.set('Left Before Shift', leftBeforeShift);
-        reportRow.set('Total Hours Required', totalHoursRequired.toFixed(2));
         reportRow.set('Total Hours Worked', totalHoursWorked.toFixed(2));
         reportRow.set('Hours Deficit/Surplus', hoursDeficit.toFixed(2));
         reportRow.set('Total Penalty Minutes', totalPenaltyMinutes);
