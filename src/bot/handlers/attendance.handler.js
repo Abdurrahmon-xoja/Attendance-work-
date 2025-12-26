@@ -1841,22 +1841,13 @@ function setupAttendanceHandlers(bot) {
     const newEndTime = workTime.end.clone().add(durationMinutes, 'minutes');
     const newEndTimeStr = newEndTime.format('HH:mm');
 
-    // FIX: Update work_extension_minutes in the Google Sheet
+    // FIX: Update work_extension_minutes in the Google Sheet using cached method
     const now = moment.tz(Config.TIMEZONE);
     const today = now.format('YYYY-MM-DD');
 
     try {
-      const worksheet = await sheetsService.getWorksheet(today);
-      await worksheet.loadHeaderRow();
-      const rows = await worksheet.getRows();
-
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // Use cached method - reduces API calls from 4 to 1
+      const employeeRow = await sheetsService.getCachedDailyRow(today, user.telegramId.toString());
 
       if (employeeRow) {
         // Get current extension and add to it
@@ -1949,22 +1940,13 @@ function setupAttendanceHandlers(bot) {
         const newEndTime = workTime.end.clone().add(durationMinutes, 'minutes');
         const newEndTimeStr = newEndTime.format('HH:mm');
 
-        // FIX: Update work_extension_minutes in the Google Sheet
+        // FIX: Update work_extension_minutes in the Google Sheet using cached method
         const now = moment.tz(Config.TIMEZONE);
         const today = now.format('YYYY-MM-DD');
 
         try {
-          const worksheet = await sheetsService.getWorksheet(today);
-          await worksheet.loadHeaderRow();
-          const rows = await worksheet.getRows();
-
-          let employeeRow = null;
-          for (const row of rows) {
-            if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
-              employeeRow = row;
-              break;
-            }
-          }
+          // Use cached method - reduces API calls from 4 to 1
+          const employeeRow = await sheetsService.getCachedDailyRow(today, user.telegramId.toString());
 
           if (employeeRow) {
             // Get current extension and add to it
@@ -3528,18 +3510,8 @@ function setupAttendanceHandlers(bot) {
         return;
       }
 
-      // Get the user's row
-      const worksheet = await sheetsService.getWorksheet(today);
-      await worksheet.loadHeaderRow();
-      const rows = await worksheet.getRows();
-
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // Get the user's row using cached method - reduces API calls from 4 to 1
+      const employeeRow = await sheetsService.getCachedDailyRow(today, user.telegramId.toString());
 
       if (!employeeRow) {
         await ctx.answerCbQuery('❌ Ошибка: данные не найдены');
@@ -3610,18 +3582,8 @@ function setupAttendanceHandlers(bot) {
         return;
       }
 
-      // Get the user's row
-      const worksheet = await sheetsService.getWorksheet(today);
-      await worksheet.loadHeaderRow();
-      const rows = await worksheet.getRows();
-
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // Get the user's row using cached method - reduces API calls from 4 to 1
+      const employeeRow = await sheetsService.getCachedDailyRow(today, user.telegramId.toString());
 
       if (!employeeRow) {
         await ctx.answerCbQuery('❌ Ошибка: данные не найдены');

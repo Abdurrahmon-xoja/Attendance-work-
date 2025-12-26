@@ -346,7 +346,7 @@ class SheetsService {
    * @param {string} telegramId - Telegram ID to find
    * @returns {Object|null} Row object or null
    */
-  async _getCachedDailyRow(sheetName, telegramId) {
+  async getCachedDailyRow(sheetName, telegramId) {
     const cacheKey = `${sheetName}:${telegramId}`;
     const cached = this._dailyRowCache.get(cacheKey);
 
@@ -938,17 +938,8 @@ class SheetsService {
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find the employee's row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // Use cached row lookup - O(1) instead of O(n) linear search
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         logger.warn(`Employee with telegram_id ${telegramId} not found in daily sheet`);
@@ -1543,17 +1534,8 @@ class SheetsService {
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find the employee's row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // Use cached row lookup - O(1) instead of O(n) linear search
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         return {
