@@ -12,7 +12,7 @@ const schedulerService = require('./services/scheduler.service');
 const locationTrackerService = require('./services/locationTracker.service');
 const anomalyDetectorService = require('./services/anomalyDetector.service');
 const { registrationWizard, setupRegistrationHandlers } = require('./bot/handlers/registration.handler');
-const { setupAttendanceHandlers } = require('./bot/handlers/attendance.handler');
+const { setupAttendanceHandlers } = require('./bot/handlers/attendance'); // Updated to use modular structure
 const { sendBusyNotification } = require('./utils/messageHelper');
 
 // Initialize bot
