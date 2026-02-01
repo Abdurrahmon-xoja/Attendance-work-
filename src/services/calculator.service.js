@@ -149,29 +149,76 @@ class CalculatorService {
    */
   static calculateRatingImpact(violationType) {
     const impacts = {
-      'LATE_NOTIFIED': Config.LATE_NOTIFIED_PENALTY,
+      'LATE_NOTIFIED_BEFORE_START': Config.LATE_NOTIFIED_BEFORE_START_PENALTY,
+      'LATE_NOTIFIED_AFTER_START': Config.LATE_NOTIFIED_AFTER_START_PENALTY,
+      'LATE_NOTIFIED': Config.LATE_NOTIFIED_BEFORE_START_PENALTY, // Legacy: map to before-start
       'LATE_SILENT': Config.LATE_SILENT_PENALTY,
-      'ABSENT_NOTIFIED': 0.0, // No penalty for notified absence
+      'LATE_CAME_AFTER_STATED': Config.LATE_CAME_AFTER_STATED_PENALTY,
+      'DID_NOT_ARRIVE_AFTER_NOTIFYING': Config.DID_NOT_ARRIVE_PENALTY,
+      'ABSENT_NOTIFIED': Config.ABSENT_NOTIFIED_PENALTY,
       'ABSENT_SILENT': Config.ABSENT_PENALTY,
+      'EARLY_DEPARTURE_MINOR': Config.EARLY_DEPARTURE_MINOR_PENALTY,
+      'EARLY_DEPARTURE_MAJOR': Config.EARLY_DEPARTURE_MAJOR_PENALTY,
+      'LEFT_BEFORE_SHIFT': Config.LEFT_BEFORE_SHIFT_PENALTY,
       'LEFT_WITHOUT_MESSAGE': Config.LEFT_WITHOUT_MESSAGE_PENALTY,
-      'EARLY_DEPARTURE': Config.EARLY_DEPARTURE_PENALTY,
+      'EARLY_DEPARTURE': Config.EARLY_DEPARTURE_MINOR_PENALTY, // Legacy
       'DUTY_VIOLATION': Config.DUTY_VIOLATION_PENALTY,
+      'NO_SHOW': Config.NO_SHOW_PENALTY,
     };
     return impacts[violationType] || 0.0;
   }
 
   /**
-   * Get rating zone and emoji based on rating value.
+   * Determine arrival penalty type based on notification timing.
+   * @param {boolean} wasLateNotified - Whether user pressed "I'll be late"
+   * @param {boolean} notifiedBeforeStart - Whether notification was sent before work start
+   * @param {boolean} cameAfterStatedTime - Whether user arrived after their stated arrival time
+   * @returns {string} Violation type string
+   */
+  static determineArrivalPenaltyType(wasLateNotified, notifiedBeforeStart, cameAfterStatedTime) {
+    if (!wasLateNotified) {
+      return 'LATE_SILENT';
+    }
+    if (cameAfterStatedTime) {
+      return 'LATE_CAME_AFTER_STATED';
+    }
+    if (notifiedBeforeStart) {
+      return 'LATE_NOTIFIED_BEFORE_START';
+    }
+    return 'LATE_NOTIFIED_AFTER_START';
+  }
+
+  /**
+   * Determine early departure penalty based on minutes early.
+   * @param {number} earlyMinutes - How many minutes early the person left
+   * @returns {Object} { penalty, violationType } - penalty amount and type
+   */
+  static determineEarlyDeparturePenalty(earlyMinutes) {
+    if (earlyMinutes < Config.EARLY_MINOR_THRESHOLD) {
+      return { penalty: 0, violationType: null };
+    } else if (earlyMinutes < Config.EARLY_MAJOR_THRESHOLD) {
+      return { penalty: Config.EARLY_DEPARTURE_MINOR_PENALTY, violationType: 'EARLY_DEPARTURE_MINOR' };
+    } else {
+      return { penalty: Config.EARLY_DEPARTURE_MAJOR_PENALTY, violationType: 'EARLY_DEPARTURE_MAJOR' };
+    }
+  }
+
+  /**
+   * Get rating zone and emoji based on rating value (5-zone system).
    * @param {number} rating - Rating value (0-10)
    * @returns {Object} Object with {emoji, zoneName}
    */
   static getRatingZone(rating) {
-    if (rating >= Config.GREEN_ZONE_MIN) {
-      return { emoji: '🟢', zoneName: 'Зелёная зона' };
-    } else if (rating >= Config.YELLOW_ZONE_MIN) {
-      return { emoji: '🟡', zoneName: 'Жёлтая зона' };
+    if (rating >= Config.EXCELLENT_ZONE_MIN) {
+      return { emoji: '🟢', zoneName: 'Отлично' };
+    } else if (rating >= Config.GOOD_ZONE_MIN) {
+      return { emoji: '🔵', zoneName: 'Хорошо' };
+    } else if (rating >= Config.ACCEPTABLE_ZONE_MIN) {
+      return { emoji: '🟡', zoneName: 'Допустимо' };
+    } else if (rating >= Config.BAD_ZONE_MIN) {
+      return { emoji: '🟠', zoneName: 'Плохо' };
     } else {
-      return { emoji: '🔴', zoneName: 'Красная зона' };
+      return { emoji: '🔴', zoneName: 'Недопустимо' };
     }
   }
 

@@ -64,40 +64,63 @@ async function checkAndMarkNoShows(dateStr, schedulerService) {
         }
       }
 
-      // Check if person has NO activity at all
-      const hasNoActivity = !whenCome.trim() &&
-                            !leaveTime.trim() &&
-                            absent.toLowerCase() !== 'yes' &&
-                            willBeLate.toLowerCase() !== 'yes';
+      // Check if person never arrived and is not already marked absent
+      const neverArrived = !whenCome.trim() &&
+                           !leaveTime.trim() &&
+                           absent.toLowerCase() !== 'yes';
 
-      if (hasNoActivity && name.trim()) {
-        // Mark as no-show with -2 penalty
-        row.set('Point', Config.NO_SHOW_PENALTY.toString());
+      // Saying "I will be late" is NOT an absence notification.
+      // If the worker never shows up, it is a silent (unnotified) absence.
+      const saidLateButDidNotCome = neverArrived && willBeLate.toLowerCase() === 'yes';
+
+      if (neverArrived && name.trim()) {
+        // Full no-show penalty regardless of "will be late" flag
+        const noShowPoint = Config.BASE_POINTS + Config.NO_SHOW_PENALTY; // 10 + (-10) = 0
+        row.set('Point', noShowPoint.toString());
+        row.set('Arrival Penalty', Config.NO_SHOW_PENALTY.toString());
         row.set('Absent', 'Yes');
-        row.set('Why absent', 'No-show (no activity)');
+
+        if (saidLateButDidNotCome) {
+          row.set('Why absent', 'No-show (said late but did not arrive)');
+        } else {
+          row.set('Why absent', 'No-show (no activity)');
+        }
+
+        // Clear the late flag — it does not count as an absence notification
+        if (saidLateButDidNotCome) {
+          row.set('will be late', '');
+        }
+
         await row.save();
 
         noShowCount++;
-        logger.warn(`Marked ${name} (${telegramId}) as no-show with ${Config.NO_SHOW_PENALTY} points`);
+        logger.warn(`Marked ${name} (${telegramId}) as no-show with ${noShowPoint} points (penalty: ${Config.NO_SHOW_PENALTY})${saidLateButDidNotCome ? ' [said late but never came]' : ''}`);
 
-        // FIX #4: Send notification to user using safe method
+        // Send notification to user using safe method
         if (telegramId && schedulerService.bot) {
-          const sent = await schedulerService.sendMessageSafe(
-            telegramId,
-            `⚠️ ВЫ ПОЛУЧИЛИ ШТРАФ\n\n` +
-            `❌ Причина: Отсутствие без уведомления\n` +
-            `📅 Дата: ${moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY')}\n\n` +
-            `Вы не отметили приход, не уведомили об опоздании и не отметили отсутствие.\n\n` +
-            `🔴 Штраф: ${Config.NO_SHOW_PENALTY} баллов\n\n` +
-            `Пожалуйста, всегда уведомляйте о своём отсутствии!`
-          );
+          const message = saidLateButDidNotCome
+            ? `⚠️ ВЫ ПОЛУЧИЛИ ШТРАФ\n\n` +
+              `❌ Причина: Предупредили об опоздании, но не пришли на работу\n` +
+              `📅 Дата: ${moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY')}\n\n` +
+              `Вы уведомили об опоздании, но так и не пришли на работу.\n` +
+              `Предупреждение об опоздании НЕ является уведомлением об отсутствии.\n\n` +
+              `🔴 Штраф: ${Config.NO_SHOW_PENALTY} баллов (итого: ${noShowPoint})\n\n` +
+              `Если Вы не можете прийти, пожалуйста, нажмите "🚫 Отсутствую"!`
+            : `⚠️ ВЫ ПОЛУЧИЛИ ШТРАФ\n\n` +
+              `❌ Причина: Отсутствие без уведомления\n` +
+              `📅 Дата: ${moment.tz(dateStr, Config.TIMEZONE).format('DD.MM.YYYY')}\n\n` +
+              `Вы не отметили приход, не уведомили об опоздании и не отметили отсутствие.\n\n` +
+              `🔴 Штраф: ${Config.NO_SHOW_PENALTY} баллов (итого: ${noShowPoint})\n\n` +
+              `Пожалуйста, всегда уведомляйте о своём отсутствии!`;
+
+          const sent = await schedulerService.sendMessageSafe(telegramId, message);
           if (!sent) {
             logger.warn(`Could not send no-show notification to ${telegramId} - user blocked or unreachable`);
           }
         }
 
         // Add delay to avoid rate limit and network exhaustion when processing multiple no-shows
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Increased from 1s to 2s
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
     }
 

@@ -140,36 +140,18 @@ function setupCheckoutHandlers(bot) {
     // Check if leaving early (only if not using extend)
     if (!status.extendNotified && status.arrivalTime) {
       try {
-        const [arrivalHour, arrivalMin, arrivalSec] = status.arrivalTime.split(':').map(Number);
-        const arrivalDt = now.clone().set({
-          hour: arrivalHour,
-          minute: arrivalMin,
-          second: arrivalSec
-        });
+        if (now.isBefore(workTime.end)) {
+          // Leaving early!
+          const earlyMinutes = workTime.end.diff(now, 'minutes');
+          const { penalty, violationType } = CalculatorService.determineEarlyDeparturePenalty(earlyMinutes);
 
-        // Recalculate lateness and penalty
-        const { latenessMinutes } = CalculatorService.calculateLateness(workTime.start, arrivalDt);
-        if (latenessMinutes > Config.GRACE_PERIOD_MINUTES) {
-          const penaltyMinutes = CalculatorService.calculatePenaltyTime(latenessMinutes);
-          const requiredEnd = CalculatorService.calculateRequiredEndTime(workTime.end, penaltyMinutes);
+          responseText += `⚠️ Вы уходите раньше требуемого времени (${workTime.end.format('HH:mm')})\n`;
+          responseText += `⚠️ Недоработано: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
 
-          if (now.isBefore(requiredEnd)) {
-            // Leaving early!
-            const earlyMinutes = requiredEnd.diff(now, 'minutes');
-            responseText += `⚠️ Вы уходите раньше требуемого времени (${requiredEnd.format('HH:mm')})\n`;
-            responseText += `⚠️ Недоработано: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
-            responseText += '⚠️ Это будет зафиксировано как нарушение.\n';
-
-            // Log early departure violation
-            ratingImpact = CalculatorService.calculateRatingImpact('EARLY_DEPARTURE');
-            await sheetsService.logEvent(
-              user.telegramId,
-              user.nameFull,
-              'EARLY_DEPARTURE',
-              `left ${earlyMinutes} min early`,
-              ratingImpact
-            );
-            ratingImpact = 0.0; // Don't double-count
+          if (penalty === 0) {
+            responseText += `📊 Штраф: 0 (менее ${Config.EARLY_MINOR_THRESHOLD} мин)\n`;
+          } else {
+            responseText += `📊 Штраф за ранний уход: ${penalty} баллов\n`;
           }
         }
       } catch (error) {
@@ -191,27 +173,9 @@ function setupCheckoutHandlers(bot) {
     // Calculate and log end-of-day balance
     if (status.arrivalTime) {
       try {
-        // Parse arrival time
-        const [arrivalHour, arrivalMin, arrivalSec] = status.arrivalTime.split(':').map(Number);
-        const arrivalDt = now.clone().set({
-          hour: arrivalHour,
-          minute: arrivalMin,
-          second: arrivalSec
-        });
-
-        // Calculate lateness and penalty
-        const { latenessMinutes } = CalculatorService.calculateLateness(workTime.start, arrivalDt);
-        let penaltyMinutes = 0;
-        if (latenessMinutes > Config.GRACE_PERIOD_MINUTES) {
-          penaltyMinutes = CalculatorService.calculatePenaltyTime(latenessMinutes);
-        }
-
-        // Calculate required end time
-        const requiredEnd = CalculatorService.calculateRequiredEndTime(workTime.end, penaltyMinutes);
-
         // Calculate deficit or surplus
-        const deficitMinutes = CalculatorService.calculateEarlyDepartureMinutes(now, requiredEnd);
-        const surplusMinutes = CalculatorService.calculateOvertimeMinutes(now, requiredEnd);
+        const deficitMinutes = CalculatorService.calculateEarlyDepartureMinutes(now, workTime.end);
+        const surplusMinutes = CalculatorService.calculateOvertimeMinutes(now, workTime.end);
 
         // Log the day's balance
         await sheetsService.logDayBalance(
@@ -219,16 +183,14 @@ function setupCheckoutHandlers(bot) {
           user.nameFull,
           deficitMinutes,
           surplusMinutes,
-          penaltyMinutes
+          0
         );
 
         // Add balance info to response
         if (deficitMinutes > 0) {
           responseText += `\n⏱ Сегодня недоработано: ${CalculatorService.formatTimeDiff(deficitMinutes)}`;
-        } else if (surplusMinutes > 0 && penaltyMinutes === 0) {
+        } else if (surplusMinutes > 0) {
           responseText += `\n⏱ Сегодня переработано: ${CalculatorService.formatTimeDiff(surplusMinutes)}`;
-        } else if (surplusMinutes > 0 && penaltyMinutes > 0) {
-          responseText += `\n⏱ Переработка ${CalculatorService.formatTimeDiff(surplusMinutes)} не засчитана (были штрафы)`;
         }
       } catch (error) {
         logger.error(`Error calculating day balance: ${error.message}`);
@@ -239,13 +201,8 @@ function setupCheckoutHandlers(bot) {
     const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
     const todayPoint = updatedStatus.todayPoint || 0;
 
-    // Determine emoji based on points
-    let pointEmoji = '🟢';
-    if (todayPoint < 0) {
-      pointEmoji = '🔴';
-    } else if (todayPoint === 0) {
-      pointEmoji = '🟡';
-    }
+    // Determine emoji based on 5-zone rating
+    const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
     responseText += `\n\n📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`;
 
@@ -355,29 +312,11 @@ function setupCheckoutHandlers(bot) {
 
     const actualWorkedHours = (actualWorkedMinutes / 60).toFixed(2);
 
-    // Get the required end time from the daily sheet (if person came late, this will be later than normal end time)
-    const sheetName = now.format('YYYY-MM-DD');
-    const worksheet = await sheetsService.getWorksheet(sheetName);
-    await worksheet.loadHeaderRow();
-    const rows = await worksheet.getRows();
-
-    let requiredEndTime = workTime.end; // Default to normal work end time
-    for (const row of rows) {
-      if (row.get('TelegramId')?.toString().trim() === user.telegramId.toString()) {
-        const requiredEndStr = row.get('Required end time') || '';
-        if (requiredEndStr.trim()) {
-          const [reqHour, reqMinute] = requiredEndStr.split(':').map(num => parseInt(num));
-          requiredEndTime = moment.tz(Config.TIMEZONE).set({ hour: reqHour, minute: reqMinute, second: 0 });
-        }
-        break;
-      }
-    }
-
     // Check if person worked the full required hours
     const workedFullHours = actualWorkedMinutes >= requiredWorkMinutes;
 
     // Check if leaving before official end time
-    const isLeavingEarly = now.isBefore(requiredEndTime);
+    const isLeavingEarly = now.isBefore(workTime.end);
 
     // If person worked full hours, treat as normal departure regardless of scheduled end time
     if (!workedFullHours && isLeavingEarly) {
@@ -450,12 +389,7 @@ function setupCheckoutHandlers(bot) {
       const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
       const todayPoint = updatedStatus.todayPoint || 0;
 
-      let pointEmoji = '🟢';
-      if (todayPoint < 0) {
-        pointEmoji = '🔴';
-      } else if (todayPoint === 0) {
-        pointEmoji = '🟡';
-      }
+      const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
       await ctx.reply(
         `✅ Отмечен уход: ${now.format('HH:mm')}\n\n` +
@@ -735,13 +669,7 @@ function setupCheckoutHandlers(bot) {
     const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
     const todayPoint = updatedStatus.todayPoint || 0;
 
-    // Determine emoji based on points
-    let pointEmoji = '🟢';
-    if (todayPoint < 0) {
-      pointEmoji = '🔴';
-    } else if (todayPoint === 0) {
-      pointEmoji = '🟡';
-    }
+    const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
     await ctx.editMessageText(
       `✅ Отмечен уход: ${now.format('HH:mm')}\n` +
@@ -1597,36 +1525,18 @@ function setupCheckoutHandlers(bot) {
       // Check if leaving early
       if (!status.extendNotified && status.arrivalTime) {
         try {
-          const [arrivalHour, arrivalMin, arrivalSec] = status.arrivalTime.split(':').map(Number);
-          const arrivalDt = now.clone().set({
-            hour: arrivalHour,
-            minute: arrivalMin,
-            second: arrivalSec
-          });
+          if (now.isBefore(workTime.end)) {
+            // Leaving early!
+            const earlyMinutes = workTime.end.diff(now, 'minutes');
+            const { penalty, violationType } = CalculatorService.determineEarlyDeparturePenalty(earlyMinutes);
 
-          // Recalculate lateness and penalty
-          const { latenessMinutes } = CalculatorService.calculateLateness(workTime.start, arrivalDt);
-          if (latenessMinutes > Config.GRACE_PERIOD_MINUTES) {
-            const penaltyMinutes = CalculatorService.calculatePenaltyTime(latenessMinutes);
-            const requiredEnd = CalculatorService.calculateRequiredEndTime(workTime.end, penaltyMinutes);
+            responseText += `⚠️ Вы уходите раньше требуемого времени (${workTime.end.format('HH:mm')})\n`;
+            responseText += `⚠️ Недоработано: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
 
-            if (now.isBefore(requiredEnd)) {
-              // Leaving early!
-              const earlyMinutes = requiredEnd.diff(now, 'minutes');
-              responseText += `⚠️ Вы уходите раньше требуемого времени (${requiredEnd.format('HH:mm')})\n`;
-              responseText += `⚠️ Недоработано: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
-              responseText += '⚠️ Это будет зафиксировано как нарушение.\n';
-
-              // Log early departure violation
-              ratingImpact = CalculatorService.calculateRatingImpact('EARLY_DEPARTURE');
-              await sheetsService.logEvent(
-                user.telegramId,
-                user.nameFull,
-                'EARLY_DEPARTURE',
-                `left ${earlyMinutes} min early`,
-                ratingImpact
-              );
-              ratingImpact = 0.0; // Don't double-count
+            if (penalty === 0) {
+              responseText += `📊 Штраф: 0 (менее ${Config.EARLY_MINOR_THRESHOLD} мин)\n`;
+            } else {
+              responseText += `📊 Штраф за ранний уход: ${penalty} баллов\n`;
             }
           }
         } catch (error) {
@@ -1649,13 +1559,7 @@ function setupCheckoutHandlers(bot) {
       const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
       const todayPoint = updatedStatus.todayPoint || 0;
 
-      // Determine emoji based on points
-      let pointEmoji = '🟢';
-      if (todayPoint < 0) {
-        pointEmoji = '🔴';
-      } else if (todayPoint === 0) {
-        pointEmoji = '🟡';
-      }
+      const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
       responseText += `\n\n📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`;
 
@@ -1806,13 +1710,7 @@ function setupCheckoutHandlers(bot) {
       const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
       const todayPoint = updatedStatus.todayPoint || 0;
 
-      // Determine emoji based on points
-      let pointEmoji = '🟢';
-      if (todayPoint < 0) {
-        pointEmoji = '🔴';
-      } else if (todayPoint === 0) {
-        pointEmoji = '🟡';
-      }
+      const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
       await ctx.reply(
         `✅ Отмечен уход: ${now.format('HH:mm')}\n` +

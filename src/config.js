@@ -23,24 +23,51 @@ class Config {
 
   // Timing Configuration
   static GRACE_PERIOD_MINUTES = parseInt(process.env.GRACE_PERIOD_MINUTES || '7');
-  static LATE_DEADLINE_TIME = process.env.LATE_DEADLINE_TIME || '10:00';
-  static LATE_THRESHOLD_HOURS = parseFloat(process.env.LATE_THRESHOLD_HOURS || '1.0');
+
+  // Base Points (each day starts with this value)
+  static BASE_POINTS = parseInt(process.env.BASE_POINTS || '10');
+
+  // Early Departure Thresholds (minutes)
+  static EARLY_MINOR_THRESHOLD = parseInt(process.env.EARLY_MINOR_THRESHOLD || '10');
+  static EARLY_MAJOR_THRESHOLD = parseInt(process.env.EARLY_MAJOR_THRESHOLD || '40');
 
   // Penalty Coefficients
   static PENALTY_ALPHA = parseFloat(process.env.PENALTY_ALPHA || '0.25');
   static PENALTY_MULTIPLIER = parseFloat(process.env.PENALTY_MULTIPLIER || '0.5');
   static PENALTY_MAX_MINUTES = parseInt(process.env.PENALTY_MAX_MINUTES || '240');
-  static LATE_NOTIFIED_PENALTY = parseFloat(process.env.LATE_NOTIFIED_PENALTY || '-0.5');
-  static LATE_SILENT_PENALTY = parseFloat(process.env.LATE_SILENT_PENALTY || '-1.0');
-  static ABSENT_PENALTY = parseFloat(process.env.ABSENT_PENALTY || '-1.5');
-  static NO_SHOW_PENALTY = parseFloat(process.env.NO_SHOW_PENALTY || '-2.0');
-  static LEFT_WITHOUT_MESSAGE_PENALTY = parseFloat(process.env.LEFT_WITHOUT_MESSAGE_PENALTY || '-0.3');
-  static EARLY_DEPARTURE_PENALTY = parseFloat(process.env.EARLY_DEPARTURE_PENALTY || '-0.5');
-  static DUTY_VIOLATION_PENALTY = parseFloat(process.env.DUTY_VIOLATION_PENALTY || '-1.0');
 
-  // Rating Thresholds
-  static GREEN_ZONE_MIN = parseFloat(process.env.GREEN_ZONE_MIN || '8.5');
-  static YELLOW_ZONE_MIN = parseFloat(process.env.YELLOW_ZONE_MIN || '6.5');
+  // Arrival Penalties
+  static LATE_NOTIFIED_BEFORE_START_PENALTY = parseFloat(process.env.LATE_NOTIFIED_BEFORE_START_PENALTY || '-2');
+  static LATE_NOTIFIED_AFTER_START_PENALTY = parseFloat(process.env.LATE_NOTIFIED_AFTER_START_PENALTY || '-4');
+  static LATE_SILENT_PENALTY = parseFloat(process.env.LATE_SILENT_PENALTY || '-4');
+  static LATE_CAME_AFTER_STATED_PENALTY = parseFloat(process.env.LATE_CAME_AFTER_STATED_PENALTY || '-4');
+  static DID_NOT_ARRIVE_PENALTY = parseFloat(process.env.DID_NOT_ARRIVE_PENALTY || '-10');
+
+  // Departure Penalties
+  static EARLY_DEPARTURE_MINOR_PENALTY = parseFloat(process.env.EARLY_DEPARTURE_MINOR_PENALTY || '-4');
+  static EARLY_DEPARTURE_MAJOR_PENALTY = parseFloat(process.env.EARLY_DEPARTURE_MAJOR_PENALTY || '-6');
+  static LEFT_BEFORE_SHIFT_PENALTY = parseFloat(process.env.LEFT_BEFORE_SHIFT_PENALTY || '-10');
+
+  // Absence Penalties
+  static ABSENT_NOTIFIED_PENALTY = parseFloat(process.env.ABSENT_NOTIFIED_PENALTY || '-4');
+  static ABSENT_PENALTY = parseFloat(process.env.ABSENT_PENALTY || '-10');
+  static NO_SHOW_PENALTY = parseFloat(process.env.NO_SHOW_PENALTY || '-10');
+
+  // Legacy penalties (kept for compatibility)
+  static LATE_NOTIFIED_PENALTY = parseFloat(process.env.LATE_NOTIFIED_PENALTY || '-2');
+  static LEFT_WITHOUT_MESSAGE_PENALTY = parseFloat(process.env.LEFT_WITHOUT_MESSAGE_PENALTY || '-4');
+  static EARLY_DEPARTURE_PENALTY = parseFloat(process.env.EARLY_DEPARTURE_PENALTY || '-4');
+  static DUTY_VIOLATION_PENALTY = parseFloat(process.env.DUTY_VIOLATION_PENALTY || '-4');
+
+  // Rating Thresholds (5 zones)
+  static EXCELLENT_ZONE_MIN = parseFloat(process.env.EXCELLENT_ZONE_MIN || '10');
+  static GOOD_ZONE_MIN = parseFloat(process.env.GOOD_ZONE_MIN || '8');
+  static ACCEPTABLE_ZONE_MIN = parseFloat(process.env.ACCEPTABLE_ZONE_MIN || '5');
+  static BAD_ZONE_MIN = parseFloat(process.env.BAD_ZONE_MIN || '3');
+
+  // Legacy zone thresholds (mapped to new system)
+  static GREEN_ZONE_MIN = parseFloat(process.env.GREEN_ZONE_MIN || '10');
+  static YELLOW_ZONE_MIN = parseFloat(process.env.YELLOW_ZONE_MIN || '8');
 
   // Location Tracking Configuration
   static TRACKING_DURATION_MINUTES = parseFloat(process.env.TRACKING_DURATION_MINUTES || '5');

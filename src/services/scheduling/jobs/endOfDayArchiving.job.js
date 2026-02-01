@@ -184,13 +184,6 @@ async function transferDailyDataToMonthly(dateStr) {
             'Left Before Shift': 0,
             'Total Hours Required': 0,
             'Total Hours Worked': 0,
-            'Hours Deficit/Surplus': 0,
-            'Total Penalty Minutes': 0,
-            'Total Deficit Minutes': 0,
-            'Total Surplus Minutes': 0,
-            'Net Balance Minutes': 0,
-            'Net Balance (Hours)': '0:00',
-            'Balance Status': '⚪ None',
             'Total Points': 0,
             'Average Daily Points': 0,
             'Attendance Rate %': 0,
@@ -251,10 +244,15 @@ async function transferDailyDataToMonthly(dateStr) {
         monthlyRow.set('Days Absent', current + 1);
 
         // Check if notified or silent
-        if (willBeLate.toLowerCase() === 'yes') {
+        // "will be late" is NOT an absence notification — only a real absence reason counts
+        const whyAbsent = dailyRow.get('Why absent') || '';
+        const isNoShow = whyAbsent.toLowerCase().includes('no-show');
+        if (whyAbsent.trim() && !isNoShow) {
+          // Employee provided a real absence reason (e.g. sick, personal) → notified
           const notified = parseInt(monthlyRow.get('Days Absent (Notified)') || '0');
           monthlyRow.set('Days Absent (Notified)', notified + 1);
         } else {
+          // No reason, or no-show (including "said late but didn't come") → silent
           const silent = parseInt(monthlyRow.get('Days Absent (Silent)') || '0');
           monthlyRow.set('Days Absent (Silent)', silent + 1);
         }
@@ -291,51 +289,6 @@ async function transferDailyDataToMonthly(dateStr) {
       const currentRequired = parseFloat(monthlyRow.get('Total Hours Required') || '0');
       monthlyRow.set('Total Hours Required', (currentRequired + requiredHoursDaily).toFixed(2));
 
-      // Update Total Penalty Minutes
-      const currentPenalty = parseFloat(monthlyRow.get('Total Penalty Minutes') || '0');
-      monthlyRow.set('Total Penalty Minutes', (currentPenalty + penaltyMinutes).toFixed(0));
-
-      // Calculate deficit/surplus for this day
-      const dayDeficitSurplus = hoursWorked - requiredHoursDaily;
-      const dayDeficitSurplusMinutes = Math.round(dayDeficitSurplus * 60);
-
-      // Update Deficit/Surplus Minutes
-      if (dayDeficitSurplusMinutes < 0) {
-        // Deficit
-        const currentDeficit = parseFloat(monthlyRow.get('Total Deficit Minutes') || '0');
-        monthlyRow.set('Total Deficit Minutes', (currentDeficit + Math.abs(dayDeficitSurplusMinutes)).toFixed(0));
-      } else if (dayDeficitSurplusMinutes > 0) {
-        // Surplus
-        const currentSurplus = parseFloat(monthlyRow.get('Total Surplus Minutes') || '0');
-        monthlyRow.set('Total Surplus Minutes', (currentSurplus + dayDeficitSurplusMinutes).toFixed(0));
-      }
-
-      // Calculate Net Balance (Total Surplus - Total Deficit - Total Penalty)
-      const totalDeficit = parseFloat(monthlyRow.get('Total Deficit Minutes') || '0');
-      const totalSurplus = parseFloat(monthlyRow.get('Total Surplus Minutes') || '0');
-      const totalPenaltyMins = parseFloat(monthlyRow.get('Total Penalty Minutes') || '0');
-      const netBalanceMinutes = totalSurplus - totalDeficit - totalPenaltyMins;
-      monthlyRow.set('Net Balance Minutes', netBalanceMinutes.toFixed(0));
-
-      // Convert to Hours:Minutes format
-      const absMinutes = Math.abs(netBalanceMinutes);
-      const hours = Math.floor(absMinutes / 60);
-      const minutes = Math.round(absMinutes % 60);
-      const sign = netBalanceMinutes < 0 ? '-' : '+';
-      monthlyRow.set('Net Balance (Hours)', `${sign}${hours}:${minutes.toString().padStart(2, '0')}`);
-
-      // Set Balance Status
-      if (netBalanceMinutes > 60) {
-        monthlyRow.set('Balance Status', '🟢 Surplus');
-      } else if (netBalanceMinutes < -60) {
-        monthlyRow.set('Balance Status', '🔴 Deficit');
-      } else {
-        monthlyRow.set('Balance Status', '⚪ Balanced');
-      }
-
-      // Update Hours Deficit/Surplus (in hours)
-      monthlyRow.set('Hours Deficit/Surplus', (netBalanceMinutes / 60).toFixed(2));
-
       // Update Total Points
       const currentPoints = parseFloat(monthlyRow.get('Total Points') || '0');
       monthlyRow.set('Total Points', (currentPoints + point).toFixed(2));
@@ -357,22 +310,29 @@ async function transferDailyDataToMonthly(dateStr) {
       const onTimeRate = daysWorked > 0 ? ((onTimeArrivals / daysWorked) * 100).toFixed(1) : '0.0';
       monthlyRow.set('On-Time Rate %', onTimeRate);
 
-      // Set Rating Zone
+      // Set Rating Zone (5-zone system)
       const ratingValue = parseFloat(monthlyRow.get('Rating (0-10)') || '0');
-      if (ratingValue >= Config.GREEN_ZONE_MIN) {
-        monthlyRow.set('Rating Zone', '🟢 Отлично');
-      } else if (ratingValue >= Config.YELLOW_ZONE_MIN) {
-        monthlyRow.set('Rating Zone', '🟡 Норма');
+      if (ratingValue >= Config.EXCELLENT_ZONE_MIN) {
+        monthlyRow.set('Rating Zone', '🟢 Excellent');
+      } else if (ratingValue >= Config.GOOD_ZONE_MIN) {
+        monthlyRow.set('Rating Zone', '🔵 Good');
+      } else if (ratingValue >= Config.ACCEPTABLE_ZONE_MIN) {
+        monthlyRow.set('Rating Zone', '🟡 Acceptable');
+      } else if (ratingValue >= Config.BAD_ZONE_MIN) {
+        monthlyRow.set('Rating Zone', '🟠 Bad');
       } else {
-        monthlyRow.set('Rating Zone', '🔴 Риск');
+        monthlyRow.set('Rating Zone', '🔴 Unacceptable');
       }
 
       // Update Last Updated
       monthlyRow.set('Last Updated', moment.tz(Config.TIMEZONE).format('YYYY-MM-DD HH:mm:ss'));
 
       await monthlyRow.save();
-      logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h/${requiredHoursDaily.toFixed(2)}h required, penalty: ${penaltyMinutes}min, balance: ${sign}${hours}:${minutes.toString().padStart(2, '0')}, rating: ${newRating.toFixed(1)}`);
+      logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h/${requiredHoursDaily.toFixed(2)}h required, point: ${point}, rating: ${newRating.toFixed(1)}`);
     }
+
+    // Update hours calendar with daily hours and location data
+    await sheetsService.updateHoursCalendar(dateStr);
 
     logger.info(`Successfully transferred data from ${dateStr} to ${reportSheetName}`);
     return true;

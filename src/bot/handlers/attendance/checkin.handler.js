@@ -155,41 +155,22 @@ function setupCheckinHandlers(bot) {
       responseText += `🌟 Отличная работа! Вы работаете в ${dayName}!\n`;
       responseText += `💪 Такое усердие заслуживает уважения!`;
       details = isSunday ? 'sunday_work' : 'saturday_work';
-      ratingImpact = 1.0; // Bonus point for working on day off
+      ratingImpact = 0.0; // No penalty, base 10 points
     } else if (latenessStatus === 'ON_TIME') {
-      responseText += `🎉 Вы пришли вовремя!`;
+      responseText += `🎉 Вы пришли вовремя!\n`;
+      responseText += `📊 Штраф: 0 (полные ${Config.BASE_POINTS} баллов)`;
       details = 'on_time';
     } else if (latenessStatus === 'LATE' || latenessStatus === 'SOFT_LATE') {
       // Check if user notified about being late
       if (status.lateNotified) {
-        // User used late notification, less penalty
         responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (Вы предупредили)\n`;
+        responseText += `📊 Штраф за опоздание будет рассчитан при отметке`;
         details = `late_notified, ${latenessMinutes}min`;
-        ratingImpact = CalculatorService.calculateRatingImpact('LATE_NOTIFIED');
       } else {
-        // Silent late - higher penalty
+        // Silent late - penalty -4
         responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (без предупреждения)\n`;
+        responseText += `📊 Штраф: ${Config.LATE_SILENT_PENALTY} баллов`;
         details = `late_silent, ${latenessMinutes}min`;
-        ratingImpact = CalculatorService.calculateRatingImpact('LATE_SILENT');
-      }
-
-      // Calculate penalty time
-      const penaltyMinutes = CalculatorService.calculatePenaltyTime(latenessMinutes);
-      const requiredEnd = CalculatorService.calculateRequiredEndTime(workTime.end, penaltyMinutes);
-
-      responseText += `⏳ Необходимо отработать дополнительно: ${CalculatorService.formatTimeDiff(penaltyMinutes)}\n`;
-      responseText += `⏰ Уход не раньше: ${requiredEnd.format('HH:mm')}`;
-
-      // Log penalty separately if it's a violation
-      if (!status.lateNotified) {
-        await sheetsService.logEvent(
-          user.telegramId,
-          user.nameFull,
-          'LATE_SILENT',
-          `${latenessMinutes} min, penalty=${penaltyMinutes} min`,
-          ratingImpact
-        );
-        ratingImpact = 0.0; // Don't double-count
       }
     }
 
@@ -206,13 +187,8 @@ function setupCheckinHandlers(bot) {
     const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
     const todayPoint = updatedStatus.todayPoint || 0;
 
-    // Determine emoji based on points
-    let pointEmoji = '🟢';
-    if (todayPoint < 0) {
-      pointEmoji = '🔴';
-    } else if (todayPoint === 0) {
-      pointEmoji = '🟡';
-    }
+    // Determine emoji based on 5-zone rating
+    const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
     responseText += `\n\n📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`;
 
@@ -389,6 +365,8 @@ function setupCheckinHandlers(bot) {
       `✅ Ваше предупреждение принято!\n\n` +
       `Вы опоздаете на: ${CalculatorService.formatTimeDiff(durationMinutes)}\n` +
       `Ожидаемое время прибытия: ${arrivalTimeStr}\n\n` +
+      `💡 Штраф за раннее предупреждение: -2 балла (вместо -4)\n` +
+      `⚠️ Если придёте позже ${arrivalTimeStr}, штраф составит -4 балла\n\n` +
       `При прибытии отметьтесь командой '+' или кнопкой '✅ Пришёл'`
     );
 

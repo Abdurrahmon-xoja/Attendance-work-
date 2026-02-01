@@ -144,8 +144,6 @@ All settings in `.env`:
 ### Timing
 ```env
 GRACE_PERIOD_MINUTES=7          # Grace period before marked late
-LATE_DEADLINE_TIME=10:00        # Deadline to report being late
-LATE_THRESHOLD_HOURS=1.0        # Threshold for extra penalty
 ```
 
 ### Penalties (Rating Points)

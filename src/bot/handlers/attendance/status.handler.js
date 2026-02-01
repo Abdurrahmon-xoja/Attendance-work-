@@ -22,37 +22,27 @@ async function handleStatus(ctx) {
   // Get today's point from status
   const todayPoint = status.todayPoint || 0;
 
-  // Determine emoji and message based on today's point
+  // Determine emoji and message based on today's point (5-zone system)
   let pointEmoji = '⚪';
   let pointMessage = 'Пока не отмечен';
 
-  if (todayPoint >= 1.0) {
-    pointEmoji = '🟢';
-    if (status.isAbsent) {
-      pointMessage = 'Отсутствие зафиксировано';
-    } else if (status.lateNotified) {
-      pointMessage = 'Опоздание предупреждено!';
-    } else {
-      pointMessage = 'Отличная работа!';
-    }
-  } else if (todayPoint > 0 && todayPoint < 1.0) {
-    pointEmoji = '🟡';
-    pointMessage = 'Небольшое нарушение';
-  } else if (todayPoint === 0) {
-    if (status.hasArrived) {
-      pointEmoji = '🟢';
-      pointMessage = 'Без нарушений';
-    } else {
-      pointEmoji = '⚪';
-      pointMessage = 'Ожидается отметка';
-    }
-  } else if (todayPoint < 0) {
-    if (todayPoint >= -0.5) {
-      pointEmoji = '🟡';
-      pointMessage = 'Небольшое нарушение';
-    } else {
-      pointEmoji = '🔴';
+  if (!status.hasArrived && !status.isAbsent) {
+    pointEmoji = '⚪';
+    pointMessage = 'Ожидается отметка';
+  } else {
+    const zone = CalculatorService.getRatingZone(todayPoint);
+    pointEmoji = zone.emoji;
+
+    if (todayPoint >= 10) {
+      pointMessage = status.isAbsent ? 'Отсутствие зафиксировано' : 'Отличная работа!';
+    } else if (todayPoint >= 8) {
+      pointMessage = status.lateNotified ? 'Опоздание предупреждено' : 'Хорошо';
+    } else if (todayPoint >= 5) {
+      pointMessage = 'Допустимо';
+    } else if (todayPoint >= 3) {
       pointMessage = 'Есть нарушения';
+    } else {
+      pointMessage = 'Серьёзные нарушения';
     }
   }
 
@@ -100,6 +90,9 @@ async function handleStatus(ctx) {
   if (monthlyStats) {
     response += `\n⏱ За месяц (${now.format('MMMM').toUpperCase()}):\n`;
     response += `Отработано: ${CalculatorService.formatTimeDiff(Math.round(monthlyStats.totalHoursWorked * 60))} / ${CalculatorService.formatTimeDiff(Math.round(monthlyStats.totalHoursRequired * 60))}\n`;
+    if (monthlyStats.daysOnSite > 0) {
+      response += `В офисе: ${monthlyStats.daysInOffice} дн. | На объекте: ${monthlyStats.daysOnSite} дн.\n`;
+    }
     response += `Баллы: ${monthlyStats.totalPoints.toFixed(1)}\n`;
     response += `Рейтинг: ${monthlyStats.rating.toFixed(1)}/10 ${monthlyStats.ratingZone}`;
   } else {

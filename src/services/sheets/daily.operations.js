@@ -17,6 +17,20 @@ class DailyOperations {
     this._recentEvents = new Map();
   }
 
+  /**
+   * Get daily row by telegram ID using cache
+   * @param {string} sheetName - Sheet name
+   * @param {string} telegramId - Telegram ID to find
+   * @returns {Object|null} Row object or null
+   */
+  async getCachedDailyRow(sheetName, telegramId) {
+    return await this.cacheManager.getCachedDailyRow(
+      sheetName,
+      telegramId,
+      async (name, opts) => this._getCachedDailySheet(name, opts)
+    );
+  }
+
   async initializeDailySheet(dateStr) {
     try {
       const sheetName = dateStr; // e.g., "2025-10-29"
@@ -148,8 +162,8 @@ class DailyOperations {
 
       // If headers don't exist, initialize the sheet
       if (!hasHeaders) {
-        // Resize sheet to fit all columns (we now have 41 columns with auto-departure tracking)
-        await worksheet.resize({ rowCount: 1000, columnCount: 47 });
+        // Resize sheet to fit all columns
+        await worksheet.resize({ rowCount: 1000, columnCount: 50 });
 
         // Set headers
         await worksheet.setHeaderRow([
@@ -168,6 +182,7 @@ class DailyOperations {
           'Why left early',
           'will be late',
           'will be late will come at',
+          'Late notified at',
           'reminder_1_sent',
           'reminder_2_sent',
           'reminder_3_sent',
@@ -183,14 +198,15 @@ class DailyOperations {
           'Temp exit actual return',
           'Temp exit remind sent',
           'Currently out',
-          'Penalty minutes',
-          'Required end time',
           'Point',
+          'Arrival Penalty',
+          'Departure Penalty',
           'Office Responsible',
           'Arrival Location',
           'Arrival Location Accuracy',
           'Arrival Anomalies',
           'Arrival Verification Status',
+          'Location Name',
           'departure_reminder_sent',
           'auto_departure_warning_sent',
           'work_extension_minutes',
@@ -237,13 +253,12 @@ class DailyOperations {
               'Temp exit actual return': '',
               'Temp exit remind sent': 'false',
               'Currently out': 'false',
-              'Penalty minutes': '',
-              'Required end time': '',
               'Point': '',
               'Location': '',
               'Location Accuracy': '',
               'Anomalies Detected': '',
-              'Verification Status': ''
+              'Verification Status': '',
+              'Location Name': ''
             });
           }
         }
@@ -342,6 +357,7 @@ class DailyOperations {
 
         // Determine if came on time by checking work time
         let cameOnTime = 'Yes';
+        let workStartMoment = null;
         try {
           // OPTIMIZATION: Use cached roster instead of direct API call
           const rosterRows = await this._getCachedRoster();
@@ -358,14 +374,12 @@ class DailyOperations {
             // Parse work time (e.g., "10:00-19:00")
             const times = workTime.split('-');
             const startTime = times[0].trim();
-            const endTime = times[1].trim();
 
             const [startHour, startMinute] = startTime.split(':').map(num => parseInt(num));
-            const [endHour, endMinute] = endTime.split(':').map(num => parseInt(num));
 
             // Create moment objects for comparison
-            const workStart = moment.tz(Config.TIMEZONE).set({ hour: startHour, minute: startMinute, second: 0 });
-            const graceEnd = workStart.clone().add(Config.GRACE_PERIOD_MINUTES, 'minutes');
+            workStartMoment = moment.tz(Config.TIMEZONE).set({ hour: startHour, minute: startMinute, second: 0 });
+            const graceEnd = workStartMoment.clone().add(Config.GRACE_PERIOD_MINUTES, 'minutes');
 
             // Check if arrived after grace period
             if (now.isAfter(graceEnd)) {
@@ -378,82 +392,59 @@ class DailyOperations {
 
         employeeRow.set('Came on time', cameOnTime);
 
-        // Calculate point based on attendance and penalty time
-        let point = 0;
-        let penaltyMinutes = 0;
-        let requiredEndTime = '';
+        // Calculate point based on new base-10 system
+        const BASE = Config.BASE_POINTS; // 10
+        let arrivalPenalty = 0;
         const wasLate = employeeRow.get('will be late') || '';
+        const willComeAt = employeeRow.get('will be late will come at') || '';
+        const lateNotifiedAt = employeeRow.get('Late notified at') || '';
 
         if (cameOnTime === 'Yes') {
-          // Came on time: full point
-          point = 1.0;
+          // Came on time: no penalty
+          arrivalPenalty = 0;
         } else {
-          // Came late - calculate lateness and penalty
-          try {
-            // OPTIMIZATION: Use cached roster instead of direct API call
-            const rosterRows = await this._getCachedRoster();
-
-            let workTime = null;
-            for (const rosterRow of rosterRows) {
-              if (rosterRow.get('Telegram Id')?.toString().trim() === telegramId.toString()) {
-                workTime = rosterRow.get('Work time') || '';
-                break;
-              }
-            }
-
-            if (workTime && workTime !== '-') {
-              // Parse work time (e.g., "10:00-19:00")
-              const times = workTime.split('-');
-              const startTime = times[0].trim();
-              const endTime = times[1].trim();
-
-              const [startHour, startMinute] = startTime.split(':').map(num => parseInt(num));
-              const [endHour, endMinute] = endTime.split(':').map(num => parseInt(num));
-
-              // Create moment objects
-              const workStart = moment.tz(Config.TIMEZONE).set({ hour: startHour, minute: startMinute, second: 0 });
-              const workEnd = moment.tz(Config.TIMEZONE).set({ hour: endHour, minute: endMinute, second: 0 });
-              const graceEnd = workStart.clone().add(Config.GRACE_PERIOD_MINUTES, 'minutes');
-
-              // Calculate lateness
-              const latenessMinutes = Math.max(0, now.diff(graceEnd, 'minutes'));
-
-              if (latenessMinutes > 0) {
-                // Only add penalty time if person did NOT notify about being late
-                if (wasLate.toLowerCase() !== 'yes') {
-                  // Calculate penalty time
-                  penaltyMinutes = Math.floor(latenessMinutes * Config.PENALTY_MULTIPLIER);
-                  if (penaltyMinutes > Config.PENALTY_MAX_MINUTES) {
-                    penaltyMinutes = Config.PENALTY_MAX_MINUTES;
-                  }
-
-                  // Calculate required end time (work end + penalty)
-                  const requiredEnd = workEnd.clone().add(penaltyMinutes, 'minutes');
-                  requiredEndTime = requiredEnd.format('HH:mm');
-                } else {
-                  // Notified about being late - NO penalty time required!
-                  penaltyMinutes = 0;
-                  requiredEndTime = ''; // No extended work time
-                }
-              }
-            }
-          } catch (err) {
-            logger.error(`Error calculating penalty time: ${err.message}`);
-          }
-
+          // Late - determine which scenario
           if (wasLate.toLowerCase() === 'yes') {
-            // Late but notified: give +1 point (reward for being responsible)
-            // NO penalty time required!
-            point = 1.0;
+            // Check if notified before or after work start
+            let notifiedBeforeStart = false;
+            if (lateNotifiedAt && workStartMoment) {
+              try {
+                const [notifH, notifM, notifS] = lateNotifiedAt.split(':').map(Number);
+                const notifMoment = moment.tz(Config.TIMEZONE).set({ hour: notifH, minute: notifM, second: notifS || 0 });
+                notifiedBeforeStart = notifMoment.isSameOrBefore(workStartMoment);
+              } catch (err) {
+                logger.error(`Error parsing Late notified at: ${err.message}`);
+              }
+            }
+
+            // Check if arrived after stated time
+            let cameAfterStated = false;
+            if (willComeAt && willComeAt.trim()) {
+              try {
+                const [statedH, statedM] = willComeAt.trim().split(':').map(Number);
+                const statedMoment = moment.tz(Config.TIMEZONE).set({ hour: statedH, minute: statedM, second: 0 });
+                cameAfterStated = now.isAfter(statedMoment);
+              } catch (err) {
+                logger.error(`Error parsing will come at: ${err.message}`);
+              }
+            }
+
+            if (cameAfterStated) {
+              arrivalPenalty = Config.LATE_CAME_AFTER_STATED_PENALTY; // -4
+            } else if (notifiedBeforeStart) {
+              arrivalPenalty = Config.LATE_NOTIFIED_BEFORE_START_PENALTY; // -2
+            } else {
+              arrivalPenalty = Config.LATE_NOTIFIED_AFTER_START_PENALTY; // -4
+            }
           } else {
-            // Late without notification: get penalty point AND penalty time
-            point = Config.LATE_SILENT_PENALTY;
+            // Late without notification
+            arrivalPenalty = Config.LATE_SILENT_PENALTY; // -4
           }
         }
 
+        const point = BASE + arrivalPenalty;
+        employeeRow.set('Arrival Penalty', arrivalPenalty.toString());
         employeeRow.set('Point', point.toString());
-        employeeRow.set('Penalty minutes', penaltyMinutes.toString());
-        employeeRow.set('Required end time', requiredEndTime);
 
         // Reminder logic is now handled by scheduler with 3-step reminders
 
@@ -463,6 +454,8 @@ class DailyOperations {
         if (details) {
           employeeRow.set('will be late will come at', details);
         }
+        // Store notification timestamp for penalty calculation
+        employeeRow.set('Late notified at', now.format('HH:mm:ss'));
         await employeeRow.save();
       } else if (eventType === 'ABSENT' || eventType === 'ABSENT_NOTIFIED') {
         employeeRow.set('Absent', 'Yes');
@@ -470,9 +463,16 @@ class DailyOperations {
           employeeRow.set('Why absent', details);
         }
 
-        // Calculate point for absence
-        // If notified (ABSENT_NOTIFIED), give 1 point (full credit). If silent (ABSENT), apply penalty.
-        const point = eventType === 'ABSENT_NOTIFIED' ? 1.0 : Config.ABSENT_PENALTY;
+        // Calculate point for absence using base-10 system
+        const BASE = Config.BASE_POINTS; // 10
+        let arrivalPenalty;
+        if (eventType === 'ABSENT_NOTIFIED') {
+          arrivalPenalty = Config.ABSENT_NOTIFIED_PENALTY; // -4 → total = 6
+        } else {
+          arrivalPenalty = Config.ABSENT_PENALTY; // -10 → total = 0
+        }
+        const point = BASE + arrivalPenalty;
+        employeeRow.set('Arrival Penalty', arrivalPenalty.toString());
         employeeRow.set('Point', point.toString());
 
         // Person is absent, stop arrival reminders
@@ -531,7 +531,6 @@ class DailyOperations {
           employeeRow.set('Left early', 'Yes - Before shift');
 
           // Calculate how many hours before shift they left
-          const hoursBeforeShift = workStartTime.diff(now, 'minutes') / 60;
           const totalShiftHours = workEndTime.diff(workStartTime, 'minutes') / 60;
           employeeRow.set('Remaining hours to work', totalShiftHours.toFixed(2));
 
@@ -541,13 +540,11 @@ class DailyOperations {
             employeeRow.set('Why left early', 'Left before shift started');
           }
 
-          // Severe penalty for leaving before shift
-          const currentPoint = parseFloat(employeeRow.get('Point') || '0');
-          const leftBeforeShiftPenalty = -1.5; // Severe penalty
-          const newPoint = currentPoint + leftBeforeShiftPenalty;
-
-          employeeRow.set('Point', newPoint.toString());
-          logger.warn(`Left before shift penalty: ${currentPoint} → ${newPoint}`);
+          // Left before shift: total = 0
+          const departurePenalty = Config.LEFT_BEFORE_SHIFT_PENALTY; // -10
+          employeeRow.set('Departure Penalty', departurePenalty.toString());
+          employeeRow.set('Point', '0'); // Force total to 0
+          logger.warn(`Left before shift penalty: Point → 0`);
 
           await employeeRow.save();
           return true;
@@ -581,44 +578,8 @@ class DailyOperations {
           }
         }
 
-        // Determine the actual required end time (either penalty time or normal work time)
-        let actualRequiredEndTime = null;
-        const requiredEndTimeStr = employeeRow.get('Required end time') || '';
-
-        if (requiredEndTimeStr.trim()) {
-          // Has penalty time - use it
-          try {
-            const [reqHour, reqMinute] = requiredEndTimeStr.split(':').map(num => parseInt(num));
-            actualRequiredEndTime = moment.tz(Config.TIMEZONE)
-              .set({ hour: reqHour, minute: reqMinute, second: 0 });
-          } catch (err) {
-            logger.error(`Error parsing required end time: ${err.message}`);
-          }
-        } else {
-          // No penalty - use normal work end time from roster
-          try {
-            // OPTIMIZATION: Get work time from cached roster
-            const rosterRows = await this._getCachedRoster();
-
-            let workTime = null;
-            for (const rosterRow of rosterRows) {
-              if (rosterRow.get('Telegram Id')?.toString().trim() === telegramId.toString()) {
-                workTime = rosterRow.get('Work time') || '';
-                break;
-              }
-            }
-
-            if (workTime && workTime !== '-') {
-              const times = workTime.split('-');
-              const endTime = times[1].trim();
-              const [endHour, endMinute] = endTime.split(':').map(num => parseInt(num));
-              actualRequiredEndTime = moment.tz(Config.TIMEZONE)
-                .set({ hour: endHour, minute: endMinute, second: 0 });
-            }
-          } catch (err) {
-            logger.error(`Error getting normal work end time: ${err.message}`);
-          }
-        }
+        // Use normal work end time
+        let actualRequiredEndTime = workEndTime;
 
         // Check if left before required time (early departure)
         let leftEarly = 'No';
@@ -638,15 +599,18 @@ class DailyOperations {
 
             logger.info(`${name} left at ${now.format('HH:mm')} after working full hours (${actualWorkedMinutes} min). Treated as normal departure.`);
           } else {
-            // Did NOT work full hours - calculate remaining and apply penalty
+            // Did NOT work full hours - calculate remaining and apply tiered penalty
             // Calculate remaining hours based on required work hours
+            let earlyMinutes = 0;
             if (workStartTime && workEndTime) {
               const requiredWorkMinutes = workEndTime.diff(workStartTime, 'minutes');
               const remainingMinutes = requiredWorkMinutes - actualWorkedMinutes;
               remainingHours = (remainingMinutes / 60).toFixed(2);
+              earlyMinutes = actualRequiredEndTime.diff(now, 'minutes');
             } else {
               const remainingMinutes = actualRequiredEndTime.diff(now, 'minutes');
               remainingHours = (remainingMinutes / 60).toFixed(2);
+              earlyMinutes = remainingMinutes;
             }
 
             // Store early departure reason if provided
@@ -654,13 +618,16 @@ class DailyOperations {
               employeeRow.set('Why left early', details);
             }
 
-            // Early departure! Add penalty to existing point
-            const currentPoint = parseFloat(employeeRow.get('Point') || '0');
-            const earlyDeparturePenalty = Config.EARLY_DEPARTURE_PENALTY; // -0.5
-            const newPoint = currentPoint + earlyDeparturePenalty; // Accumulate
+            // Tiered early departure penalty
+            const CalculatorService = require('../calculator.service');
+            const { penalty: departurePenalty, violationType } = CalculatorService.determineEarlyDeparturePenalty(earlyMinutes);
 
+            const currentPoint = parseFloat(employeeRow.get('Point') || '0');
+            const newPoint = Math.max(0, currentPoint + departurePenalty);
+
+            employeeRow.set('Departure Penalty', departurePenalty.toString());
             employeeRow.set('Point', newPoint.toString());
-            logger.warn(`Early departure detected for ${name}: left at ${now.format('HH:mm')}, required until ${actualRequiredEndTime.format('HH:mm')}. Remaining hours: ${remainingHours}. Point: ${currentPoint} → ${newPoint}`);
+            logger.warn(`Early departure detected for ${name}: left at ${now.format('HH:mm')}, required until ${actualRequiredEndTime.format('HH:mm')}. Early: ${earlyMinutes} min. Penalty: ${departurePenalty}. Point: ${currentPoint} → ${newPoint}`);
           }
         } else if (actualRequiredEndTime) {
           // Left on time or later - no remaining hours
@@ -725,16 +692,14 @@ class DailyOperations {
       // Clear arrival data
       employeeRow.set('When come', '');
       employeeRow.set('Came on time', '');
-      employeeRow.set('Penalty minutes', '');
-      employeeRow.set('Required end time', '');
 
       // Mark as absent with fraud attempt note
       employeeRow.set('Absent', 'Yes');
       const anomalyList = anomalies.map(a => a.type).join(', ');
       employeeRow.set('Why absent', `FRAUD ATTEMPT: ${anomalyList}`);
 
-      // Set severe penalty for fraud attempt
-      employeeRow.set('Point', '-2.0');
+      // Set severe penalty for fraud attempt (0 points)
+      employeeRow.set('Point', '0');
 
       // Clear location tracking data
       employeeRow.set('Verification Status', 'FRAUD_DETECTED');
@@ -1119,6 +1084,41 @@ class DailyOperations {
       return true;
     } catch (error) {
       logger.error(`Error updating arrival location: ${error.message}`);
+      return false;
+    } finally {
+      this.cacheManager._endOperation(sheetName);
+    }
+  }
+
+  /**
+   * Update on-site location name for employee (used when arriving at a work site outside office)
+   * @param {number} telegramId - User's Telegram ID
+   * @param {string} locationName - Geocoded location name
+   * @returns {boolean} True if successful
+   */
+  async updateOnsiteLocationName(telegramId, locationName) {
+    const now = moment.tz(Config.TIMEZONE);
+    const sheetName = now.format('YYYY-MM-DD');
+
+    try {
+      this.cacheManager._startOperation(sheetName);
+
+      await this.initializeDailySheet(sheetName);
+
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
+
+      if (!employeeRow) {
+        logger.warn(`Employee with telegram_id ${telegramId} not found for location name update`);
+        return false;
+      }
+
+      employeeRow.set('Location Name', locationName);
+      await employeeRow.save();
+
+      logger.info(`On-site location name updated for telegram_id ${telegramId}: ${locationName}`);
+      return true;
+    } catch (error) {
+      logger.error(`Error updating on-site location name: ${error.message}`);
       return false;
     } finally {
       this.cacheManager._endOperation(sheetName);

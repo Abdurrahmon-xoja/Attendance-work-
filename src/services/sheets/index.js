@@ -350,6 +350,16 @@ class SheetsService {
   }
 
   /**
+   * Update on-site location name for employee
+   * @param {number} telegramId - User's Telegram ID
+   * @param {string} locationName - Geocoded location name
+   * @returns {boolean} True if successful
+   */
+  async updateOnsiteLocationName(telegramId, locationName) {
+    return await this.dailyOperations.updateOnsiteLocationName(telegramId, locationName);
+  }
+
+  /**
    * Update location verification status
    * @param {number} telegramId - User's Telegram ID
    * @param {string} status - Verification status
@@ -447,6 +457,24 @@ class SheetsService {
    */
   async updateMonthlyReport(dateStr) {
     return await this.monthlyOperations.updateMonthlyReport(dateStr);
+  }
+
+  /**
+   * Initialize Hours Calendar sheet for a given month
+   * @param {string} yearMonth - Year and month in YYYY-MM format
+   * @returns {boolean} True if successful
+   */
+  async initializeHoursCalendar(yearMonth) {
+    return await this.monthlyOperations.initializeHoursCalendar(yearMonth);
+  }
+
+  /**
+   * Update Hours Calendar with data from a specific day
+   * @param {string} dateStr - Date string in YYYY-MM-DD format
+   * @returns {boolean} True if successful
+   */
+  async updateHoursCalendar(dateStr) {
+    return await this.monthlyOperations.updateHoursCalendar(dateStr);
   }
 }
 

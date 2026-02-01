@@ -14,6 +14,10 @@ const awaitingLocationForCheckIn = new Map();
 // Map<userId, { requestTime, user, checkoutTime, departureType, workTimeData }>
 const awaitingLocationForCheckout = new Map();
 
+// Temporary state: users awaiting on-site confirmation after out-of-geofence arrival
+// Map<userId, { requestTime, user, location, anomaly }>
+const awaitingOnsiteConfirmation = new Map();
+
 /**
  * Get user data or prompt for registration
  */
@@ -60,6 +64,7 @@ async function getMainMenuKeyboard(userId) {
 module.exports = {
   awaitingLocationForCheckIn,
   awaitingLocationForCheckout,
+  awaitingOnsiteConfirmation,
   getUserOrPromptRegistration,
   getMainMenuKeyboard
 };

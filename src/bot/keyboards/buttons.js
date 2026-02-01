@@ -183,6 +183,20 @@ class Keyboards {
   }
 
   /**
+   * Get on-site confirmation keyboard
+   * Shown when user arrives outside office geofence
+   * @returns {Object} Inline keyboard markup
+   */
+  static getOnsiteConfirmationKeyboard() {
+    return Markup.inlineKeyboard([
+      [
+        Markup.button.callback('✅ Да, на объекте', 'onsite_confirm:yes'),
+        Markup.button.callback('❌ Нет', 'onsite_confirm:no')
+      ]
+    ]);
+  }
+
+  /**
    * Get a yes/no confirmation keyboard
    * @param {string} confirmData - Callback data for confirmation
    * @param {string} cancelData - Callback data for cancellation

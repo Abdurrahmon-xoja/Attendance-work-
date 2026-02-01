@@ -8,10 +8,6 @@ module.exports = {
   GRACE_PERIOD_MINUTES: 7,              // Grace period for arrival (7 minutes)
   LATE_NOTIFICATION_DEADLINE_MINUTES: 15, // Deadline to notify about being late (15 min after start)
 
-  // Work Time
-  LATE_DEADLINE_TIME: '10:00',          // Default late notification deadline
-  LATE_THRESHOLD_HOURS: 1.0,            // Hours late threshold
-
   // Auto-Departure
   AUTO_DEPARTURE_GRACE_MINUTES: 15,     // Grace period before auto-departure
   AUTO_DEPARTURE_WARNING_MINUTES: 10,   // Warning time before auto-departure

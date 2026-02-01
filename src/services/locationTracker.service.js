@@ -74,14 +74,14 @@ class LocationTrackerService {
         initialLocation: {
           latitude: initialLocation.latitude,
           longitude: initialLocation.longitude,
-          accuracy: initialLocation.accuracy || null,
+          accuracy: initialLocation.accuracy ?? null,
           timestamp: Date.now()
         },
         locationHistory: [
           {
             latitude: initialLocation.latitude,
             longitude: initialLocation.longitude,
-            accuracy: initialLocation.accuracy || null,
+            accuracy: initialLocation.accuracy ?? null,
             timestamp: Date.now()
           }
         ],
@@ -94,7 +94,7 @@ class LocationTrackerService {
 
       logger.info(`📍 Started location tracking for ${userName} (${userId})`);
       logger.info(`   Initial location: ${initialLocation.latitude.toFixed(6)}, ${initialLocation.longitude.toFixed(6)}`);
-      logger.info(`   Accuracy: ${initialLocation.accuracy ? initialLocation.accuracy.toFixed(1) + 'm' : 'unknown'}`);
+      logger.info(`   Accuracy: ${initialLocation.accuracy != null ? initialLocation.accuracy.toFixed(1) + 'm' : 'unknown'}`);
 
       if (initialAnomaly) {
         logger.warn(`   ⚠️ Initial anomaly: ${initialAnomaly.type}`);
@@ -157,7 +157,7 @@ class LocationTrackerService {
       const locationPoint = {
         latitude: location.latitude,
         longitude: location.longitude,
-        accuracy: location.accuracy || null,
+        accuracy: location.accuracy ?? null,
         timestamp: Date.now()
       };
 

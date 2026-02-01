@@ -11,7 +11,8 @@ const {
   getUserOrPromptRegistration,
   getMainMenuKeyboard,
   awaitingLocationForCheckIn,
-  awaitingLocationForCheckout
+  awaitingLocationForCheckout,
+  awaitingOnsiteConfirmation
 } = require('./shared');
 
 /**
@@ -43,5 +44,6 @@ module.exports = {
   getUserOrPromptRegistration,
   getMainMenuKeyboard,
   awaitingLocationForCheckIn,
-  awaitingLocationForCheckout
+  awaitingLocationForCheckout,
+  awaitingOnsiteConfirmation
 };

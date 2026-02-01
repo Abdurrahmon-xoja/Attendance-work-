@@ -21,6 +21,7 @@ async function execute() {
     logger.info(`Creating monthly report for ${yearMonth}`);
 
     await sheetsService.initializeMonthlyReport(yearMonth);
+    await sheetsService.initializeHoursCalendar(yearMonth);
 
     logger.info(`Monthly report ${yearMonth} created successfully`);
   } catch (error) {

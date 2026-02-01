@@ -65,6 +65,169 @@ bot.command('testgif', async (ctx) => {
   await sendBusyNotification(ctx, 'Тестовое сообщение с гифкой от администратора 🎬');
 });
 
+// /endday - Manually trigger end-of-day archiving
+bot.command('endday', async (ctx) => {
+  const telegramId = ctx.from.id;
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+  const args = ctx.message.text.split(' ');
+  const moment = require('moment-timezone');
+  const dateStr = args[1] || moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+  await ctx.reply(`⏳ Запуск архивации за ${dateStr}...`);
+  logger.info(`Admin ${telegramId} triggered manual end-of-day for ${dateStr}`);
+  try {
+    const { handleEndOfDay } = require('./services/scheduling/jobs/endOfDayArchiving.job');
+    await handleEndOfDay(dateStr, schedulerService, true);
+    await ctx.reply(`✅ Архивация за ${dateStr} завершена!`);
+  } catch (error) {
+    logger.error(`Error in manual end-of-day: ${error.message}`);
+    await ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+});
+
+// /monthlyreport - Create monthly report sheet
+bot.command('monthlyreport', async (ctx) => {
+  const telegramId = ctx.from.id;
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+  const args = ctx.message.text.split(' ');
+  const moment = require('moment-timezone');
+  const yearMonth = args[1] || moment.tz(Config.TIMEZONE).format('YYYY-MM');
+  await ctx.reply(`⏳ Создание месячного отчёта за ${yearMonth}...`);
+  logger.info(`Admin ${telegramId} triggered monthly report for ${yearMonth}`);
+  try {
+    await sheetsService.initializeMonthlyReport(yearMonth);
+    await ctx.reply(`✅ Лист Report_${yearMonth} создан!`);
+  } catch (error) {
+    logger.error(`Error creating monthly report: ${error.message}`);
+    await ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+});
+
+// /updatereport - Recalculate monthly report from daily sheets
+bot.command('updatereport', async (ctx) => {
+  const telegramId = ctx.from.id;
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+  const args = ctx.message.text.split(' ');
+  const moment = require('moment-timezone');
+  const dateStr = args[1] || moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+  await ctx.reply(`⏳ Пересчёт месячного отчёта по данным за ${dateStr}...`);
+  logger.info(`Admin ${telegramId} triggered monthly report update for ${dateStr}`);
+  try {
+    await sheetsService.updateMonthlyReport(dateStr);
+    const yearMonth = moment.tz(dateStr, Config.TIMEZONE).format('YYYY-MM');
+    await ctx.reply(`✅ Report_${yearMonth} пересчитан!`);
+  } catch (error) {
+    logger.error(`Error updating monthly report: ${error.message}`);
+    await ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+});
+
+// /noshow - Manually trigger no-show check
+bot.command('noshow', async (ctx) => {
+  const telegramId = ctx.from.id;
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+  const args = ctx.message.text.split(' ');
+  const moment = require('moment-timezone');
+  const dateStr = args[1] || moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+  await ctx.reply(`⏳ Проверка отсутствующих за ${dateStr}...`);
+  logger.info(`Admin ${telegramId} triggered no-show check for ${dateStr}`);
+  try {
+    const { checkAndMarkNoShows } = require('./services/scheduling/jobs/noShowCheck.job');
+    const count = await checkAndMarkNoShows(dateStr, schedulerService);
+    await ctx.reply(`✅ Проверка завершена! Отмечено no-show: ${count || 0}`);
+  } catch (error) {
+    logger.error(`Error in manual no-show check: ${error.message}`);
+    await ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+});
+
+// /createsheet - Manually create daily sheet
+bot.command('createsheet', async (ctx) => {
+  const telegramId = ctx.from.id;
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+  const args = ctx.message.text.split(' ');
+  const moment = require('moment-timezone');
+  const dateStr = args[1] || moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+  await ctx.reply(`⏳ Создание дневного листа за ${dateStr}...`);
+  logger.info(`Admin ${telegramId} triggered daily sheet creation for ${dateStr}`);
+  try {
+    await sheetsService.initializeDailySheet(dateStr);
+    await ctx.reply(`✅ Дневной лист ${dateStr} создан!`);
+  } catch (error) {
+    logger.error(`Error creating daily sheet: ${error.message}`);
+    await ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+});
+
+// /hourscalendar - Create or update Hours Calendar sheet
+bot.command('hourscalendar', async (ctx) => {
+  const telegramId = ctx.from.id;
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+  const args = ctx.message.text.split(' ');
+  const moment = require('moment-timezone');
+  // Accept either YYYY-MM (init only) or YYYY-MM-DD (init + update day)
+  const param = args[1] || moment.tz(Config.TIMEZONE).format('YYYY-MM');
+  const isFullDate = /^\d{4}-\d{2}-\d{2}$/.test(param);
+  const yearMonth = isFullDate
+    ? moment.tz(param, Config.TIMEZONE).format('YYYY-MM')
+    : param;
+
+  logger.info(`Admin ${telegramId} triggered hours calendar for ${param}`);
+
+  try {
+    if (isFullDate) {
+      await ctx.reply(`⏳ Обновление календаря часов за ${param}...`);
+      await sheetsService.initializeHoursCalendar(yearMonth);
+      await sheetsService.updateHoursCalendar(param);
+      await ctx.reply(`✅ Hours_${yearMonth} обновлён данными за ${param}!`);
+    } else {
+      await ctx.reply(`⏳ Создание календаря часов за ${yearMonth}...`);
+      await sheetsService.initializeHoursCalendar(yearMonth);
+      await ctx.reply(`✅ Лист Hours_${yearMonth} создан!`);
+    }
+  } catch (error) {
+    logger.error(`Error in hours calendar command: ${error.message}`);
+    await ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+});
+
+// /adminhelp - Show admin commands
+bot.command('adminhelp', async (ctx) => {
+  const telegramId = ctx.from.id;
+  if (!Config.ADMIN_TELEGRAM_IDS.includes(telegramId)) {
+    await ctx.reply('❌ Эта команда доступна только администраторам.');
+    return;
+  }
+  await ctx.reply(
+    `🔧 КОМАНДЫ АДМИНИСТРАТОРА\n\n` +
+    `/createsheet [YYYY-MM-DD] — Создать дневной лист\n` +
+    `/monthlyreport [YYYY-MM] — Создать лист месячного отчёта\n` +
+    `/updatereport [YYYY-MM-DD] — Пересчитать отчёт из дневных листов\n` +
+    `/hourscalendar [YYYY-MM или YYYY-MM-DD] — Календарь часов (создать / обновить день)\n` +
+    `/endday [YYYY-MM-DD] — Архивация дня (ночные → отчёт → Excel → удаление)\n` +
+    `/noshow [YYYY-MM-DD] — Проверка no-show\n` +
+    `/testgif — Тест гифки\n` +
+    `/adminhelp — Эта справка`
+  );
+});
+
 // Live Location Handler - processes location updates during tracking
 const handleLocationUpdate = async (ctx) => {
   try {
@@ -91,7 +254,7 @@ const handleLocationUpdate = async (ctx) => {
     const result = locationTrackerService.addLocationUpdate(userId, {
       latitude: location.latitude,
       longitude: location.longitude,
-      accuracy: location.horizontal_accuracy || null
+      accuracy: location.horizontal_accuracy ?? null
     });
 
     if (!result.success) {
@@ -101,7 +264,7 @@ const handleLocationUpdate = async (ctx) => {
 
     const session = locationTrackerService.getSession(userId);
     const updateNum = session ? session.updateCount : '?';
-    logger.info(`📍 Live location update #${updateNum} from user ${userId}: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)} (accuracy: ${location.horizontal_accuracy ? location.horizontal_accuracy.toFixed(1) + 'm' : 'unknown'})`);
+    logger.info(`📍 Live location update #${updateNum} from user ${userId}: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)} (accuracy: ${location.horizontal_accuracy != null ? location.horizontal_accuracy.toFixed(1) + 'm' : 'unknown'})`);
 
     // Check if anomalies detected
     if (result.hasAnomalies && result.newAnomalies.length > 0) {
@@ -369,6 +532,7 @@ async function start() {
 
     // Start polling without waiting for connection
     bot.launch({
+      dropPendingUpdates: true,
       allowedUpdates: ['message', 'callback_query', 'edited_message']
     }).then(() => {
       logger.info('✅ Telegram bot connected and polling');
@@ -398,7 +562,6 @@ async function start() {
     logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     logger.info(`Timezone: ${Config.TIMEZONE}`);
     logger.info(`Grace period: ${Config.GRACE_PERIOD_MINUTES} minutes`);
-    logger.info(`Late deadline: ${Config.LATE_DEADLINE_TIME}`);
     logger.info(`Auto-create daily sheet: ${Config.AUTO_CREATE_DAILY_SHEET ? 'ON' : 'OFF (dev mode)'}`);
     logger.info(`Work reminders: ${Config.ENABLE_WORK_REMINDERS ? 'ON' : 'OFF'}`);
     logger.info('Bot is now running. Press Ctrl+C to stop.');

@@ -120,7 +120,7 @@ class AnomalyDetectorService {
     // IMPORTANT: Account for GPS accuracy margin of error
     // Only flag if user is CLEARLY outside the geofence
     // If accuracy is poor (e.g., 495m), we can't be certain where they actually are
-    const accuracy = location.accuracy || 0;
+    const accuracy = location.accuracy ?? 0;
     const geofenceRadius = Config.GEOFENCE_RADIUS_METERS || 200;
 
     // Calculate the confidence margin: distance must exceed (geofence + accuracy) to be certain
@@ -350,7 +350,7 @@ class AnomalyDetectorService {
 
     // IMPORTANT: Account for GPS accuracy during initial check-in
     // Be lenient with poor GPS accuracy - only reject if CLEARLY outside
-    const accuracy = location.accuracy || 0;
+    const accuracy = location.accuracy ?? 0;
     const geofenceRadius = Config.GEOFENCE_RADIUS_METERS || 200;
     const confidenceMargin = geofenceRadius + accuracy;
 

@@ -163,6 +163,8 @@ class MonthlyOperations {
             workSchedule: row.get('Work Schedule') || '',
             totalWorkDays: parseInt(row.get('Total Work Days') || '0'),
             daysWorked: parseInt(row.get('Days Worked') || '0'),
+            daysInOffice: parseInt(row.get('Days In Office') || '0'),
+            daysOnSite: parseInt(row.get('Days On Site') || '0'),
             daysAbsent: parseInt(row.get('Days Absent') || '0'),
             daysAbsentNotified: parseInt(row.get('Days Absent (Notified)') || '0'),
             daysAbsentSilent: parseInt(row.get('Days Absent (Silent)') || '0'),
@@ -172,13 +174,6 @@ class MonthlyOperations {
             earlyDepartures: parseInt(row.get('Early Departures') || '0'),
             totalHoursRequired: parseFloat(row.get('Total Hours Required') || '0'),
             totalHoursWorked: parseFloat(row.get('Total Hours Worked') || '0'),
-            hoursDeficitSurplus: parseFloat(row.get('Hours Deficit/Surplus') || '0'),
-            totalPenaltyMinutes: parseInt(row.get('Total Penalty Minutes') || '0'),
-            totalDeficitMinutes: parseInt(row.get('Total Deficit Minutes') || '0'),
-            totalSurplusMinutes: parseInt(row.get('Total Surplus Minutes') || '0'),
-            netBalanceMinutes: parseInt(row.get('Net Balance Minutes') || '0'),
-            netBalanceHours: row.get('Net Balance (Hours)') || '+0:00',
-            balanceStatus: row.get('Balance Status') || '⚪ Balanced',
             totalPoints: parseFloat(row.get('Total Points') || '0'),
             averageDailyPoints: parseFloat(row.get('Average Daily Points') || '0'),
             rating: parseFloat(row.get('Rating (0-10)') || '0'),
@@ -216,8 +211,8 @@ class MonthlyOperations {
         worksheet = await this.coreService.doc.addSheet({ title: sheetName });
       }
 
-      // Resize sheet to fit all columns (we have 31 columns)
-      await worksheet.resize({ rowCount: 1000, columnCount: 35 });
+      // Resize sheet to fit all columns
+      await worksheet.resize({ rowCount: 1000, columnCount: 30 });
 
       // Set headers
       await worksheet.setHeaderRow([
@@ -227,6 +222,8 @@ class MonthlyOperations {
         'Work Schedule',
         'Total Work Days',
         'Days Worked',
+        'Days In Office',
+        'Days On Site',
         'Days Absent',
         'Days Absent (Notified)',
         'Days Absent (Silent)',
@@ -238,13 +235,6 @@ class MonthlyOperations {
         'Left Before Shift',
         'Total Hours Required',
         'Total Hours Worked',
-        'Hours Deficit/Surplus',
-        'Total Penalty Minutes',
-        'Total Deficit Minutes',
-        'Total Surplus Minutes',
-        'Net Balance Minutes',
-        'Net Balance (Hours)',
-        'Balance Status',
         'Total Points',
         'Average Daily Points',
         'Attendance Rate %',
@@ -309,6 +299,8 @@ class MonthlyOperations {
             'Work Schedule': workTime,
             'Total Work Days': totalWorkDays,
             'Days Worked': 0,
+            'Days In Office': 0,
+            'Days On Site': 0,
             'Days Absent': 0,
             'Days Absent (Notified)': 0,
             'Days Absent (Silent)': 0,
@@ -320,13 +312,6 @@ class MonthlyOperations {
             'Left Before Shift': 0,
             'Total Hours Required': totalHoursRequired.toFixed(2),
             'Total Hours Worked': 0,
-            'Hours Deficit/Surplus': 0,
-            'Total Penalty Minutes': 0,
-            'Total Deficit Minutes': 0,
-            'Total Surplus Minutes': 0,
-            'Net Balance Minutes': 0,
-            'Net Balance (Hours)': '0:00',
-            'Balance Status': '⚪ None',
             'Total Points': 0,
             'Average Daily Points': 0,
             'Attendance Rate %': 0,
@@ -409,7 +394,8 @@ class MonthlyOperations {
               penaltyMinutes: parseInt(dayRow.get('Penalty minutes') || '0'),
               point: parseFloat(dayRow.get('Point') || '0'),
               balanceType: dayRow.get('Day Balance Type') || '',
-              balanceMinutes: parseInt(dayRow.get('Balance Minutes') || '0')
+              balanceMinutes: parseInt(dayRow.get('Balance Minutes') || '0'),
+              locationName: dayRow.get('Location Name') || ''
             });
           }
         } catch (dayErr) {
@@ -440,6 +426,8 @@ class MonthlyOperations {
         let totalPoints = 0;
         let totalDeficitMinutes = 0;
         let totalSurplusMinutes = 0;
+        let daysInOffice = 0;
+        let daysOnSite = 0;
 
         // Get employee's Saturday work status for filtering weekend data
         const employee = await this.findEmployeeByTelegramId(telegramId);
@@ -483,6 +471,11 @@ class MonthlyOperations {
           } else if (dayData.whenCome.trim()) {
             // Came to work
             daysWorked++;
+            if (dayData.locationName.trim() !== '') {
+              daysOnSite++;
+            } else {
+              daysInOffice++;
+            }
             totalHoursWorked += dayData.hoursWorked;
             totalPenaltyMinutes += dayData.penaltyMinutes;
             totalPoints += dayData.point;
@@ -530,17 +523,22 @@ class MonthlyOperations {
         const avgDailyPoints = daysWorked > 0 ? (totalPoints / daysWorked).toFixed(2) : 0;
 
         // Calculate rating (0-10 scale)
-        // Rating = (totalPoints / totalWorkDays) × 10
-        const rating = totalWorkDays > 0 ? Math.max(0, Math.min(10, (totalPoints / totalWorkDays) * 10)).toFixed(1) : 0;
+        // Each day is 0-10, so average daily points is already on the 0-10 scale
+        const rating = totalWorkDays > 0 ? Math.max(0, (totalPoints / totalWorkDays)).toFixed(1) : 0;
 
-        // Determine rating zone
+        // Determine rating zone (5-zone system)
         let ratingZone = '⚪';
-        if (rating >= Config.GREEN_ZONE_MIN) {
-          ratingZone = '🟢 Green';
-        } else if (rating >= Config.YELLOW_ZONE_MIN) {
-          ratingZone = '🟡 Yellow';
+        const ratingNum = parseFloat(rating);
+        if (ratingNum >= Config.EXCELLENT_ZONE_MIN) {
+          ratingZone = '🟢 Excellent';
+        } else if (ratingNum >= Config.GOOD_ZONE_MIN) {
+          ratingZone = '🔵 Good';
+        } else if (ratingNum >= Config.ACCEPTABLE_ZONE_MIN) {
+          ratingZone = '🟡 Acceptable';
+        } else if (ratingNum >= Config.BAD_ZONE_MIN) {
+          ratingZone = '🟠 Bad';
         } else {
-          ratingZone = '🔴 Red';
+          ratingZone = '🔴 Unacceptable';
         }
 
         // FIX: Balance minutes already calculated above in the daily data loop
@@ -565,6 +563,8 @@ class MonthlyOperations {
 
         // Update report row (don't update Total Work Days and Total Hours Required - they're set at creation)
         reportRow.set('Days Worked', daysWorked);
+        reportRow.set('Days In Office', daysInOffice);
+        reportRow.set('Days On Site', daysOnSite);
         reportRow.set('Days Absent', daysAbsent);
         reportRow.set('Days Absent (Notified)', daysAbsentNotified);
         reportRow.set('Days Absent (Silent)', daysAbsentSilent);
@@ -575,13 +575,6 @@ class MonthlyOperations {
         reportRow.set('Early Departures (Worked Full Hours)', earlyFullHours);
         reportRow.set('Left Before Shift', leftBeforeShift);
         reportRow.set('Total Hours Worked', totalHoursWorked.toFixed(2));
-        reportRow.set('Hours Deficit/Surplus', hoursDeficit.toFixed(2));
-        reportRow.set('Total Penalty Minutes', totalPenaltyMinutes);
-        reportRow.set('Total Deficit Minutes', totalDeficitMinutes);
-        reportRow.set('Total Surplus Minutes', totalSurplusMinutes);
-        reportRow.set('Net Balance Minutes', netBalanceMinutes);
-        reportRow.set('Net Balance (Hours)', netBalanceHours); // FIX: Use numeric value, not formatted string
-        reportRow.set('Balance Status', balanceStatus);
         reportRow.set('Total Points', totalPoints.toFixed(2));
         reportRow.set('Average Daily Points', avgDailyPoints);
         reportRow.set('Attendance Rate %', attendanceRate);
@@ -597,6 +590,145 @@ class MonthlyOperations {
       return true;
     } catch (error) {
       logger.error(`Error updating monthly report: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Initialize Hours Calendar sheet for a given month
+   * Creates a calendar-style sheet with one column per day showing hours worked and location
+   * @param {string} yearMonth - Year and month in YYYY-MM format (e.g. "2026-01")
+   * @returns {boolean} True if successful
+   */
+  async initializeHoursCalendar(yearMonth) {
+    try {
+      const sheetName = `Hours_${yearMonth}`;
+
+      // Check if sheet already exists
+      let worksheet = this.coreService.doc.sheetsByTitle[sheetName];
+      if (worksheet) {
+        logger.info(`Hours calendar sheet already exists: ${sheetName}`);
+        return true;
+      }
+
+      logger.info(`Creating hours calendar sheet: ${sheetName}`);
+
+      // Calculate days in month
+      const daysInMonth = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).daysInMonth();
+
+      // Create sheet
+      worksheet = await this.coreService.doc.addSheet({ title: sheetName });
+
+      // Resize: Name + Telegram ID + day columns
+      await worksheet.resize({ rowCount: 1000, columnCount: 2 + daysInMonth });
+
+      // Build headers: Name, Telegram ID, 1, 2, ..., daysInMonth
+      const headers = ['Name', 'Telegram ID'];
+      for (let d = 1; d <= daysInMonth; d++) {
+        headers.push(String(d));
+      }
+      await worksheet.setHeaderRow(headers);
+      await worksheet.loadHeaderRow();
+
+      // Get all employees from cached roster
+      const rows = await this._getCachedRoster();
+
+      for (const row of rows) {
+        const nameFull = row.get('Name full') || '';
+        const telegramId = row.get('Telegram Id') || '';
+
+        if (nameFull.trim()) {
+          await worksheet.addRow({
+            'Name': nameFull,
+            'Telegram ID': telegramId
+          });
+        }
+      }
+
+      logger.info(`Hours calendar ${sheetName} initialized with all employees`);
+      return true;
+    } catch (error) {
+      logger.error(`Error initializing hours calendar: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Update Hours Calendar with data from a specific day
+   * Writes "hours | location" into the day column for each employee who worked
+   * @param {string} dateStr - Date string in YYYY-MM-DD format
+   * @returns {boolean} True if successful
+   */
+  async updateHoursCalendar(dateStr) {
+    try {
+      const date = moment.tz(dateStr, Config.TIMEZONE);
+      const yearMonth = date.format('YYYY-MM');
+      const dayOfMonth = String(date.date()); // column name, e.g. '15'
+
+      const sheetName = `Hours_${yearMonth}`;
+
+      // Get or create the Hours sheet
+      let hoursSheet = this.coreService.doc.sheetsByTitle[sheetName];
+      if (!hoursSheet) {
+        await this.initializeHoursCalendar(yearMonth);
+        hoursSheet = this.coreService.doc.sheetsByTitle[sheetName];
+      }
+
+      if (!hoursSheet) {
+        logger.error(`Failed to get or create hours calendar sheet: ${sheetName}`);
+        return false;
+      }
+
+      await hoursSheet.loadHeaderRow();
+      const hoursRows = await hoursSheet.getRows();
+
+      // Load the daily sheet for dateStr
+      const dailySheet = this.coreService.doc.sheetsByTitle[dateStr];
+      if (!dailySheet) {
+        logger.warn(`Daily sheet ${dateStr} not found for hours calendar update`);
+        return false;
+      }
+
+      await dailySheet.loadHeaderRow();
+      const dailyRows = await dailySheet.getRows();
+
+      // Build a map of telegramId -> hours row for fast lookup
+      const hoursRowMap = new Map();
+      for (const hRow of hoursRows) {
+        const tid = (hRow.get('Telegram ID') || '').toString().trim();
+        if (tid) {
+          hoursRowMap.set(tid, hRow);
+        }
+      }
+
+      // Process each employee from the daily sheet
+      for (const dailyRow of dailyRows) {
+        const telegramId = (dailyRow.get('TelegramId') || '').toString().trim();
+        if (!telegramId) continue;
+
+        const whenCome = (dailyRow.get('When come') || '').trim();
+        if (!whenCome) continue; // Employee didn't work this day
+
+        const hoursWorked = dailyRow.get('Hours worked') || '0';
+        const locationName = (dailyRow.get('Location Name') || '').trim();
+        const location = locationName !== '' ? 'Site' : 'Office';
+
+        const cellValue = `${hoursWorked} | ${location}`;
+
+        // Find the employee row in hours sheet
+        const hoursRow = hoursRowMap.get(telegramId);
+        if (hoursRow) {
+          hoursRow.set(dayOfMonth, cellValue);
+          await hoursRow.save();
+        } else {
+          logger.warn(`Employee ${telegramId} not found in hours calendar ${sheetName}`);
+        }
+      }
+
+      logger.info(`Hours calendar ${sheetName} updated with data from ${dateStr}`);
+      return true;
+    } catch (error) {
+      logger.error(`Error updating hours calendar: ${error.message}`);
       return false;
     }
   }

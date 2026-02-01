@@ -12,8 +12,10 @@ const Config = require('../../../config');
 const logger = require('../../../utils/logger');
 const {
   awaitingLocationForCheckIn,
-  awaitingLocationForCheckout
+  awaitingLocationForCheckout,
+  awaitingOnsiteConfirmation
 } = require('./shared');
+const geocodingService = require('../../../services/geocoding.service');
 
 /**
  * Process arrival check-in with location
@@ -32,7 +34,7 @@ async function processArrivalWithLocation(ctx, user, location) {
       {
         latitude: location.latitude,
         longitude: location.longitude,
-        accuracy: location.horizontal_accuracy || location.accuracy || null
+        accuracy: location.horizontal_accuracy ?? location.accuracy ?? null
       },
       user.nameFull
     );
@@ -47,15 +49,29 @@ async function processArrivalWithLocation(ctx, user, location) {
       const anomaly = trackingResult.initialAnomaly;
       logger.warn(`Initial location anomaly for ${user.nameFull}: ${anomaly.type}`);
 
-      // If CRITICAL (wrong location), reject check-in
+      // If CRITICAL (wrong location), ask if on-site instead of rejecting
       if (anomaly.severity === 'CRITICAL') {
-        await ctx.reply(
-          `❌ К сожалению, отметка прихода не выполнена: ${anomaly.description}\n\n` +
-          `Пожалуйста, убедитесь, что Вы находитесь в офисе перед отметкой прихода.`,
-          Keyboards.getMainMenu(ctx.from.id)
-        );
-        // Stop tracking
+        // Stop tracking while awaiting confirmation
         locationTrackerService.forceStopTracking(user.telegramId);
+
+        // Store state for on-site confirmation
+        const userId = user.telegramId.toString();
+        awaitingOnsiteConfirmation.set(userId, {
+          requestTime: Date.now(),
+          user,
+          location,
+          anomaly
+        });
+
+        // Auto-cleanup after 5 minutes
+        setTimeout(() => {
+          awaitingOnsiteConfirmation.delete(userId);
+        }, 5 * 60 * 1000);
+
+        await ctx.reply(
+          `📍 Ваше местоположение вне офиса. Вы на объекте?`,
+          Keyboards.getOnsiteConfirmationKeyboard()
+        );
         return;
       }
     }
@@ -92,37 +108,23 @@ async function processArrivalWithLocation(ctx, user, location) {
     if (isDayOff) {
       const dayName = isSunday ? 'воскресенье' : 'субботу';
       responseText += `🌟 Отличная работа! Вы работаете в ${dayName}!\n`;
-      responseText += `💪 Такое усердие заслуживает уважения!\n`;
+      responseText += `💪 Такое усердие заслуживает уважения!`;
       details = isSunday ? 'sunday_work' : 'saturday_work';
-      ratingImpact = 1.0; // Bonus point for working on day off
+      ratingImpact = 0.0; // No penalty, base 10 points
     } else if (latenessStatus === 'ON_TIME') {
-      responseText += `🎉 Вы пришли вовремя!`;
+      responseText += `🎉 Вы пришли вовремя!\n`;
+      responseText += `📊 Штраф: 0 (полные ${Config.BASE_POINTS} баллов)`;
       details = 'on_time';
     } else if (latenessStatus === 'LATE' || latenessStatus === 'SOFT_LATE') {
       if (status.lateNotified) {
         responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (Вы предупредили)\n`;
+        responseText += `📊 Штраф за опоздание будет рассчитан при отметке`;
         details = `late_notified, ${latenessMinutes}min`;
-        ratingImpact = CalculatorService.calculateRatingImpact('LATE_NOTIFIED');
       } else {
+        // Silent late - penalty -4
         responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (без предупреждения)\n`;
+        responseText += `📊 Штраф: ${Config.LATE_SILENT_PENALTY} баллов`;
         details = `late_silent, ${latenessMinutes}min`;
-        ratingImpact = CalculatorService.calculateRatingImpact('LATE_SILENT');
-      }
-
-      const penaltyMinutes = CalculatorService.calculatePenaltyTime(latenessMinutes);
-      const requiredEnd = CalculatorService.calculateRequiredEndTime(workTime.end, penaltyMinutes);
-      responseText += `⏳ Необходимо отработать дополнительно: ${CalculatorService.formatTimeDiff(penaltyMinutes)}\n`;
-      responseText += `⏰ Уход не раньше: ${requiredEnd.format('HH:mm')}`;
-
-      if (!status.lateNotified) {
-        await sheetsService.logEvent(
-          user.telegramId,
-          user.nameFull,
-          'LATE_SILENT',
-          `${latenessMinutes} min, penalty=${penaltyMinutes} min`,
-          ratingImpact
-        );
-        ratingImpact = 0.0;
       }
     }
 
@@ -139,18 +141,15 @@ async function processArrivalWithLocation(ctx, user, location) {
     await sheetsService.updateArrivalLocation(
       user.telegramId,
       { latitude: location.latitude, longitude: location.longitude },
-      location.horizontal_accuracy || location.accuracy || null
+      location.horizontal_accuracy ?? location.accuracy ?? null
     );
 
     // Get today's points
     const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
     const todayPoint = updatedStatus.todayPoint || 0;
-    let pointEmoji = '🟢';
-    if (todayPoint < 0) {
-      pointEmoji = '🔴';
-    } else if (todayPoint === 0) {
-      pointEmoji = '🟡';
-    }
+
+    // Determine emoji based on 5-zone rating
+    const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
     responseText += `\n\n📊 Баллы за сегодня: ${todayPoint} ${pointEmoji}`;
 
@@ -173,6 +172,107 @@ async function processArrivalWithLocation(ctx, user, location) {
 }
 
 /**
+ * Process on-site arrival (user confirmed they are at a work site outside the office)
+ * @param {Object} ctx - Telegraf context (callback query)
+ * @param {Object} onsiteState - State from awaitingOnsiteConfirmation Map
+ * @returns {Promise<void>}
+ */
+async function processOnsiteArrival(ctx, onsiteState) {
+  const { user, location } = onsiteState;
+
+  try {
+    const now = moment.tz(Config.TIMEZONE);
+
+    // Reverse geocode the location
+    const locationName = await geocodingService.reverseGeocode(location.latitude, location.longitude);
+
+    // Parse work schedule
+    const workTime = CalculatorService.parseWorkTime(user.workTime);
+    if (!workTime) {
+      await ctx.editMessageText(
+        '❌ К сожалению, в Вашем расписании обнаружена ошибка. Пожалуйста, обратитесь к администратору.'
+      );
+      return;
+    }
+
+    // Check if arrived today
+    const status = await sheetsService.getUserStatusToday(user.telegramId);
+
+    // Check if Sunday OR (Saturday AND user doesn't work on Saturday)
+    const isSunday = now.day() === 0;
+    const isSaturday = now.day() === 6;
+    const isDayOff = isSunday || (isSaturday && user.doNotWorkSaturday);
+
+    // Calculate lateness
+    const { latenessMinutes, status: latenessStatus } = CalculatorService.calculateLateness(
+      workTime.start,
+      now
+    );
+
+    let responseText = `✅ **Приход отмечен! (на объекте)**\n`;
+    responseText += `📍 ${locationName}\n\n`;
+    let details = 'on_site, on_time';
+
+    if (isDayOff) {
+      const dayName = isSunday ? 'воскресенье' : 'субботу';
+      responseText += `🌟 Отличная работа! Вы работаете в ${dayName}!\n`;
+      details = `on_site, ${isSunday ? 'sunday_work' : 'saturday_work'}`;
+    } else if (latenessStatus === 'ON_TIME') {
+      responseText += `🎉 Вы пришли вовремя!\n`;
+      responseText += `📊 Штраф: 0 (полные ${Config.BASE_POINTS} баллов)`;
+      details = 'on_site, on_time';
+    } else if (latenessStatus === 'LATE' || latenessStatus === 'SOFT_LATE') {
+      if (status.lateNotified) {
+        responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (Вы предупредили)\n`;
+        responseText += `📊 Штраф за опоздание будет рассчитан при отметке`;
+        details = `on_site, late_notified, ${latenessMinutes}min`;
+      } else {
+        responseText += `⚠️ Опоздание: ${CalculatorService.formatTimeDiff(latenessMinutes)} (без предупреждения)\n`;
+        responseText += `📊 Штраф: ${Config.LATE_SILENT_PENALTY} баллов`;
+        details = `on_site, late_silent, ${latenessMinutes}min`;
+      }
+    }
+
+    // Log arrival event
+    await sheetsService.logEvent(
+      user.telegramId,
+      user.nameFull,
+      'ARRIVAL',
+      details,
+      0.0
+    );
+
+    // Store location data
+    await sheetsService.updateArrivalLocation(
+      user.telegramId,
+      { latitude: location.latitude, longitude: location.longitude },
+      location.horizontal_accuracy ?? location.accuracy ?? null
+    );
+
+    // Write on-site location name
+    await sheetsService.updateOnsiteLocationName(user.telegramId, locationName);
+
+    // Get today's points
+    const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
+    const todayPoint = updatedStatus.todayPoint || 0;
+
+    const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
+
+    responseText += `\n\n📊 Баллы за сегодня: ${todayPoint} ${pointEmoji}`;
+
+    await ctx.editMessageText(responseText, { parse_mode: 'Markdown' });
+    await ctx.reply('Главное меню:', Keyboards.getMainMenu(ctx.from.id));
+    logger.info(`On-site arrival logged for ${user.nameFull}: ${details}, location: ${locationName}`);
+
+  } catch (error) {
+    logger.error(`Error processing on-site arrival: ${error.message}`);
+    await ctx.editMessageText(
+      '❌ К сожалению, произошла ошибка при отметке прихода. Пожалуйста, попробуйте снова или обратитесь к администратору.'
+    );
+  }
+}
+
+/**
  * Process departure/checkout with location verification
  * @param {Object} ctx - Telegram context
  * @param {Object} user - User object
@@ -190,7 +290,7 @@ async function processDepartureWithLocation(ctx, user, location, checkoutState) 
       {
         latitude: location.latitude,
         longitude: location.longitude,
-        accuracy: location.horizontal_accuracy || location.accuracy || null
+        accuracy: location.horizontal_accuracy ?? location.accuracy ?? null
       },
       user.nameFull
     );
@@ -208,8 +308,26 @@ async function processDepartureWithLocation(ctx, user, location, checkoutState) 
       const anomaly = trackingResult.initialAnomaly;
       logger.warn(`Initial departure location anomaly for ${user.nameFull}: ${anomaly.type}`);
 
-      // If CRITICAL (wrong location - outside geofence), flag as fraud
+      // If CRITICAL (wrong location - outside geofence), check if on-site user
       if (anomaly.severity === 'CRITICAL' && anomaly.type === 'WRONG_LOCATION') {
+        // Check if this user arrived on-site (has Location Name populated)
+        let isOnsiteUser = false;
+        try {
+          const now2 = moment.tz(Config.TIMEZONE);
+          const sheetName = now2.format('YYYY-MM-DD');
+          const employeeRow = await sheetsService.getCachedDailyRow(sheetName, user.telegramId.toString());
+          if (employeeRow) {
+            const locationNameValue = employeeRow.get('Location Name') || '';
+            isOnsiteUser = locationNameValue.trim() !== '';
+          }
+        } catch (err) {
+          logger.error(`Error checking on-site status for departure: ${err.message}`);
+        }
+
+        // Skip fraud detection for on-site users — they are expected to be outside the office
+        if (isOnsiteUser) {
+          logger.info(`On-site user ${user.nameFull} departing from outside office — allowed`);
+        } else {
         isFraudulent = true;
         fraudReason = anomaly.description;
 
@@ -256,6 +374,7 @@ async function processDepartureWithLocation(ctx, user, location, checkoutState) 
         locationTrackerService.forceStopTracking(user.telegramId);
         return;
       }
+      }
     }
 
     // Get user's work time from checkout state
@@ -287,17 +406,23 @@ async function processDepartureWithLocation(ctx, user, location, checkoutState) 
     let ratingImpact = 0.0;
 
     if (isEarly && !workedFullHours) {
-      // Leaving early AND did not work full required hours - apply penalties
+      // Leaving early AND did not work full required hours - apply tiered penalties
       responseText += `⚠️ Ранний уход: ${CalculatorService.formatTimeDiff(earlyMinutes)}\n`;
       details = `early_${earlyMinutes}min` + (departureMessage ? `, msg: ${departureMessage}` : '');
 
-      // Check if message was provided
-      if (Config.REQUIRE_DEPARTURE_MESSAGE && !departureMessage) {
-        ratingImpact = CalculatorService.calculateRatingImpact('LEFT_WITHOUT_MESSAGE');
-        responseText += `⚠️ Ушли рано без сообщения: ${ratingImpact} баллов\n`;
-      } else if (departureMessage) {
-        ratingImpact = CalculatorService.calculateRatingImpact('EARLY_DEPARTURE');
-        responseText += `📝 Указана причина: ${departureMessage}\n`;
+      // Tiered early departure penalty
+      const { penalty, violationType } = CalculatorService.determineEarlyDeparturePenalty(earlyMinutes);
+
+      if (penalty === 0) {
+        responseText += `📊 Штраф: 0 (менее ${Config.EARLY_MINOR_THRESHOLD} мин)\n`;
+      } else {
+        responseText += `📊 Штраф за ранний уход: ${penalty} баллов\n`;
+      }
+
+      if (departureMessage) {
+        responseText += `📝 Причина: ${departureMessage}\n`;
+      } else if (Config.REQUIRE_DEPARTURE_MESSAGE) {
+        responseText += `⚠️ Ушли без сообщения\n`;
       }
     } else {
       // Either left on time OR worked full required hours - treat as normal departure
@@ -321,18 +446,15 @@ async function processDepartureWithLocation(ctx, user, location, checkoutState) 
     await sheetsService.updateDepartureLocation(
       user.telegramId,
       { latitude: location.latitude, longitude: location.longitude },
-      location.horizontal_accuracy || location.accuracy || null
+      location.horizontal_accuracy ?? location.accuracy ?? null
     );
 
     // Get today's points
     const updatedStatus = await sheetsService.getUserStatusToday(user.telegramId);
     const todayPoint = updatedStatus.todayPoint || 0;
-    let pointEmoji = '🟢';
-    if (todayPoint < 0) {
-      pointEmoji = '🔴';
-    } else if (todayPoint === 0) {
-      pointEmoji = '🟡';
-    }
+
+    // Determine emoji based on 5-zone rating
+    const { emoji: pointEmoji } = CalculatorService.getRatingZone(todayPoint);
 
     responseText += `\n\n📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`;
     responseText += `\n\n👋 Хорошего вечера!`;
@@ -517,10 +639,56 @@ function setupLocationHandler(bot) {
       );
     }
   });
+
+  // Handle on-site confirmation callback buttons
+  bot.action(/^onsite_confirm:(.+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+
+      const choice = ctx.match[1]; // 'yes' or 'no'
+      const userId = ctx.from.id.toString();
+
+      const onsiteState = awaitingOnsiteConfirmation.get(userId);
+
+      if (!onsiteState) {
+        // State expired or already processed
+        await ctx.editMessageText(
+          '⏰ Время ожидания истекло. Пожалуйста, попробуйте снова нажав "✅ Пришёл".'
+        );
+        return;
+      }
+
+      // Remove from map (one-time use)
+      awaitingOnsiteConfirmation.delete(userId);
+
+      if (choice === 'yes') {
+        // Immediately remove buttons and show loading
+        await ctx.editMessageText('⏳ Определяем местоположение и отмечаем приход...');
+        await processOnsiteArrival(ctx, onsiteState);
+      } else {
+        // No — show rejection and return to main menu
+        await ctx.editMessageText(
+          '❌ Отметка прихода отменена.\n\n' +
+          'Пожалуйста, убедитесь, что Вы находитесь в офисе перед отметкой прихода.'
+        );
+        await ctx.reply('Главное меню:', Keyboards.getMainMenu(ctx.from.id));
+      }
+    } catch (error) {
+      logger.error(`Error in on-site confirmation handler: ${error.message}`);
+      try {
+        await ctx.editMessageText(
+          '❌ Произошла ошибка. Пожалуйста, попробуйте снова.'
+        );
+      } catch (e) {
+        // ignore edit failures
+      }
+    }
+  });
 }
 
 module.exports = {
   processArrivalWithLocation,
+  processOnsiteArrival,
   processDepartureWithLocation,
   handleCheckoutLocation,
   setupLocationHandler
