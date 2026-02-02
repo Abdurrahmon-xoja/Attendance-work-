@@ -683,14 +683,26 @@ class MonthlyOperations {
         const telegramId = (dailyRow.get('TelegramId') || '').toString().trim();
         if (!telegramId) continue;
 
+        const point = dailyRow.get('Point') || '0';
         const whenCome = (dailyRow.get('When come') || '').trim();
-        if (!whenCome) continue; // Employee didn't work this day
+        const absent = (dailyRow.get('Absent') || '').trim().toLowerCase();
 
-        const hoursWorked = dailyRow.get('Hours worked') || '0';
-        const locationName = (dailyRow.get('Location Name') || '').trim();
-        const location = locationName !== '' ? 'Site' : 'Office';
+        let cellValue = '';
 
-        const cellValue = `${hoursWorked} | ${location}`;
+        if (whenCome) {
+          // Employee worked this day
+          const hoursWorked = dailyRow.get('Hours worked') || '0';
+          const locationName = (dailyRow.get('Location Name') || '').trim();
+          const location = locationName !== '' ? 'Site' : 'Office';
+          cellValue = `${hoursWorked}h | ${location} | ${point}pt`;
+        } else if (absent === 'yes' || absent === 'true') {
+          // Employee was absent
+          const whyAbsent = (dailyRow.get('Why absent') || '').trim();
+          cellValue = whyAbsent ? `Absent (${whyAbsent}) | ${point}pt` : `Absent | ${point}pt`;
+        } else {
+          // No activity
+          cellValue = `No-show | ${point}pt`;
+        }
 
         // Find the employee row in hours sheet
         const hoursRow = hoursRowMap.get(telegramId);
