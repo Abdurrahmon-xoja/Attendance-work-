@@ -203,6 +203,9 @@ class MonthlyOperations {
     try {
       const sheetName = `Report_${yearMonth}`; // e.g., "Report_2025-10"
 
+      // Refresh document metadata to ensure sheetsByTitle is up-to-date
+      await this.coreService.doc.loadInfo();
+
       // Check if sheet already exists
       let worksheet = this.coreService.doc.sheetsByTitle[sheetName];
 
@@ -342,6 +345,9 @@ class MonthlyOperations {
       const date = moment.tz(dateStr, Config.TIMEZONE);
       const yearMonth = date.format('YYYY-MM');
       const reportSheetName = `Report_${yearMonth}`;
+
+      // Refresh document metadata to avoid stale sheet references
+      await this.coreService.doc.loadInfo();
 
       // Get or create monthly report sheet
       let reportSheet = this.coreService.doc.sheetsByTitle[reportSheetName];
@@ -569,6 +575,9 @@ class MonthlyOperations {
     try {
       const sheetName = `Hours_${yearMonth}`;
 
+      // Refresh document metadata to avoid stale sheet references
+      await this.coreService.doc.loadInfo();
+
       // Check if sheet already exists
       let worksheet = this.coreService.doc.sheetsByTitle[sheetName];
       if (worksheet) {
@@ -631,6 +640,9 @@ class MonthlyOperations {
       const dayOfMonth = String(date.date()); // column name, e.g. '15'
 
       const sheetName = `Hours_${yearMonth}`;
+
+      // Refresh document metadata to avoid stale sheet references
+      await this.coreService.doc.loadInfo();
 
       // Get or create the Hours sheet
       let hoursSheet = this.coreService.doc.sheetsByTitle[sheetName];
