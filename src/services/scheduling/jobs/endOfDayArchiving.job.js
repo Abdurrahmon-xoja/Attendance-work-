@@ -341,9 +341,8 @@ async function transferDailyDataToMonthly(dateStr) {
       const avgDailyPoints = daysWorked > 0 ? totalPoints / daysWorked : 0;
       monthlyRow.set('Average Daily Points', avgDailyPoints.toFixed(2));
 
-      // Update Rating (0-10) — average of points, not accumulation
-      const totalWorkDays = parseInt(monthlyRow.get('Total Work Days') || '0');
-      const ratingDivisor = totalWorkDays > 0 ? totalWorkDays : (totalDays > 0 ? totalDays : 1);
+      // Update Rating (0-10) = Total Points / (Days Worked + Days Absent)
+      const ratingDivisor = totalDays > 0 ? totalDays : 1;
       const newRating = Math.max(0, Math.min(10, totalPoints / ratingDivisor));
       monthlyRow.set('Rating (0-10)', newRating.toFixed(1));
       const attendanceRate = totalDays > 0 ? ((daysWorked / totalDays) * 100).toFixed(1) : '0.0';

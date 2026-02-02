@@ -454,6 +454,7 @@ class MonthlyOperations {
           if (dayData.absent.toLowerCase() === 'yes') {
             // Marked as absent
             daysAbsent++;
+            totalPoints += dayData.point; // Include absent-day points (6 if notified, 0 if silent)
             // Check if this is a no-show (automated) vs user-provided reason
             const isNoShow = dayData.whyAbsent && dayData.whyAbsent.toLowerCase().includes('no-show');
             if (dayData.whyAbsent && dayData.whyAbsent.trim() && !isNoShow) {
@@ -490,10 +491,11 @@ class MonthlyOperations {
               leftBeforeShift++;
             }
           } else {
-            // FIX: No activity at all (not marked absent, no arrival)
+            // No activity at all (not marked absent, no arrival)
             // This shouldn't happen if no-show checker runs, but handle it as silent absence
             daysAbsent++;
             daysAbsentSilent++;
+            totalPoints += dayData.point; // 0 points for no-show
             logger.warn(`Employee has no activity on work day ${dayData.date} but not marked as absent - counting as silent absence`);
           }
 
@@ -505,8 +507,9 @@ class MonthlyOperations {
         const avgDailyPoints = daysWorked > 0 ? (totalPoints / daysWorked).toFixed(2) : 0;
 
         // Calculate rating (0-10 scale)
-        // Each day is 0-10, so average daily points is already on the 0-10 scale
-        const rating = totalWorkDays > 0 ? Math.max(0, (totalPoints / totalWorkDays)).toFixed(1) : 0;
+        // Rating = Total Points / (Days Worked + Days Absent)
+        const totalTrackedDays = daysWorked + daysAbsent;
+        const rating = totalTrackedDays > 0 ? Math.max(0, Math.min(10, totalPoints / totalTrackedDays)).toFixed(1) : 0;
 
         // Determine rating zone (5-zone system)
         let ratingZone = '⚪';
