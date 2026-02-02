@@ -385,16 +385,12 @@ class MonthlyOperations {
               date: checkDateStr,
               cameOnTime: dayRow.get('Came on time') || '',
               whenCome: dayRow.get('When come') || '',
-              leaveTime: dayRow.get('Leave time') || '',
               hoursWorked: parseFloat(dayRow.get('Hours worked') || '0'),
               leftEarly: dayRow.get('Left early') || '',
               willBeLate: dayRow.get('will be late') || '',
               absent: dayRow.get('Absent') || '',
               whyAbsent: dayRow.get('Why absent') || '',
-              penaltyMinutes: parseInt(dayRow.get('Penalty minutes') || '0'),
               point: parseFloat(dayRow.get('Point') || '0'),
-              balanceType: dayRow.get('Day Balance Type') || '',
-              balanceMinutes: parseInt(dayRow.get('Balance Minutes') || '0'),
               locationName: dayRow.get('Location Name') || ''
             });
           }
@@ -422,10 +418,7 @@ class MonthlyOperations {
         let earlyFullHours = 0;
         let leftBeforeShift = 0;
         let totalHoursWorked = 0;
-        let totalPenaltyMinutes = 0;
         let totalPoints = 0;
-        let totalDeficitMinutes = 0;
-        let totalSurplusMinutes = 0;
         let daysInOffice = 0;
         let daysOnSite = 0;
 
@@ -477,7 +470,6 @@ class MonthlyOperations {
               daysInOffice++;
             }
             totalHoursWorked += dayData.hoursWorked;
-            totalPenaltyMinutes += dayData.penaltyMinutes;
             totalPoints += dayData.point;
 
             if (dayData.cameOnTime.toLowerCase() === 'yes') {
@@ -505,17 +497,7 @@ class MonthlyOperations {
             logger.warn(`Employee has no activity on work day ${dayData.date} but not marked as absent - counting as silent absence`);
           }
 
-          // Accumulate balance minutes
-          if (dayData.balanceType === 'DEFICIT' && dayData.balanceMinutes < 0) {
-            totalDeficitMinutes += Math.abs(dayData.balanceMinutes);
-          } else if (dayData.balanceType === 'SURPLUS' && dayData.balanceMinutes > 0) {
-            totalSurplusMinutes += dayData.balanceMinutes;
-          }
         }
-
-        // Read Total Hours Required from the report (already calculated when sheet was created)
-        const totalHoursRequired = parseFloat(reportRow.get('Total Hours Required') || '0');
-        const hoursDeficit = totalHoursRequired - totalHoursWorked;
 
         // Calculate rates
         const attendanceRate = totalWorkDays > 0 ? ((daysWorked / totalWorkDays) * 100).toFixed(1) : 0;
@@ -539,26 +521,6 @@ class MonthlyOperations {
           ratingZone = '🟠 Bad';
         } else {
           ratingZone = '🔴 Unacceptable';
-        }
-
-        // FIX: Balance minutes already calculated above in the daily data loop
-        // Calculate net balance
-        const netBalanceMinutes = totalSurplusMinutes - totalDeficitMinutes;
-
-        // FIX #3: Convert to numeric hours for Excel (not a formatted string)
-        // Excel will display this with custom formatting [h]:mm
-        const netBalanceHours = netBalanceMinutes / 60; // Convert to decimal hours
-
-        // Determine balance status
-        let balanceStatus = '⚪ Balanced';
-        if (netBalanceMinutes > 60) {
-          balanceStatus = '🟢 Surplus';
-        } else if (netBalanceMinutes < -60) {
-          balanceStatus = '🔴 Deficit';
-        } else if (netBalanceMinutes > 0) {
-          balanceStatus = '🟡 Slight Surplus';
-        } else if (netBalanceMinutes < 0) {
-          balanceStatus = '🟡 Slight Deficit';
         }
 
         // Update report row (don't update Total Work Days and Total Hours Required - they're set at creation)
