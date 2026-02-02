@@ -21,7 +21,28 @@ async function execute() {
     logger.info(`Creating monthly report for ${yearMonth}`);
 
     await sheetsService.initializeMonthlyReport(yearMonth);
-    await sheetsService.initializeHoursCalendar(yearMonth);
+
+    // Initialize Hours Calendar with retry on failure
+    let calendarCreated = false;
+    try {
+      calendarCreated = await sheetsService.initializeHoursCalendar(yearMonth);
+    } catch (calendarError) {
+      logger.warn(`Hours Calendar creation failed, retrying in 5s: ${calendarError.message}`);
+    }
+
+    if (!calendarCreated) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      try {
+        calendarCreated = await sheetsService.initializeHoursCalendar(yearMonth);
+        if (calendarCreated) {
+          logger.info(`Hours Calendar created successfully on retry`);
+        } else {
+          logger.error(`Hours Calendar creation failed on retry for ${yearMonth}`);
+        }
+      } catch (retryError) {
+        logger.error(`Hours Calendar retry also failed: ${retryError.message}`);
+      }
+    }
 
     logger.info(`Monthly report ${yearMonth} created successfully`);
   } catch (error) {

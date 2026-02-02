@@ -152,6 +152,7 @@ async function transferDailyDataToMonthly(dateStr) {
 
           let workSchedule = '';
           let company = '';
+          let doNotWorkSaturday = false;
 
           // Find employee in roster
           for (const rosterRow of rosterRows) {
@@ -161,9 +162,36 @@ async function transferDailyDataToMonthly(dateStr) {
             if ((telegramId && rosterTelegramId === telegramId) || rosterName === name) {
               workSchedule = rosterRow.get('Work time') || '';
               company = rosterRow.get('Company') || '';
+              doNotWorkSaturday = (rosterRow.get('Do not work in Saturday') || '').toString().toLowerCase().trim() === 'yes';
               break;
             }
           }
+
+          // Calculate Total Work Days using same calendar logic as initializeMonthlyReport
+          let totalWorkDays = 0;
+          const monthStart = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).startOf('month');
+          const monthEnd = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).endOf('month');
+
+          for (let day = monthStart.clone(); day.isSameOrBefore(monthEnd); day.add(1, 'day')) {
+            const dayOfWeek = day.day();
+            if (dayOfWeek === 0) continue; // Skip Sundays
+            if (dayOfWeek === 6 && doNotWorkSaturday) continue; // Skip Saturdays if configured
+            totalWorkDays++;
+          }
+
+          // Calculate Total Hours Required from work schedule
+          let dailyHours = 8; // Default
+          if (workSchedule && workSchedule !== '-') {
+            try {
+              const times = workSchedule.split('-');
+              const [startHour, startMin] = times[0].trim().split(':').map(Number);
+              const [endHour, endMin] = times[1].trim().split(':').map(Number);
+              dailyHours = (endHour + endMin / 60) - (startHour + startMin / 60);
+            } catch (err) {
+              // Use default 8 hours
+            }
+          }
+          const totalHoursRequired = totalWorkDays * dailyHours;
 
           // Add new row to monthly report
           monthlyRow = await monthlySheet.addRow({
@@ -171,8 +199,10 @@ async function transferDailyDataToMonthly(dateStr) {
             'Telegram ID': telegramId,
             'Company': company,
             'Work Schedule': workSchedule,
-            'Total Work Days': 0,
+            'Total Work Days': totalWorkDays,
             'Days Worked': 0,
+            'Days In Office': 0,
+            'Days On Site': 0,
             'Days Absent': 0,
             'Days Absent (Notified)': 0,
             'Days Absent (Silent)': 0,
@@ -182,7 +212,7 @@ async function transferDailyDataToMonthly(dateStr) {
             'Early Departures': 0,
             'Early Departures (Worked Full Hours)': 0,
             'Left Before Shift': 0,
-            'Total Hours Required': 0,
+            'Total Hours Required': totalHoursRequired.toFixed(2),
             'Total Hours Worked': 0,
             'Total Points': 0,
             'Average Daily Points': 0,
@@ -213,6 +243,7 @@ async function transferDailyDataToMonthly(dateStr) {
       const point = parseFloat(dailyRow.get('Point') || '0');
       const penaltyMinutes = parseFloat(dailyRow.get('Penalty minutes') || '0');
       const remainingHours = parseFloat(dailyRow.get('Remaining hours to work') || '0');
+      const locationName = (dailyRow.get('Location Name') || '').trim();
 
       // Get required hours for this day from roster
       // FIXED: Calculate required hours for ALL days, not just days when employee came
@@ -236,6 +267,15 @@ async function transferDailyDataToMonthly(dateStr) {
       if (whenCome.trim()) {
         const current = parseInt(monthlyRow.get('Days Worked') || '0');
         monthlyRow.set('Days Worked', current + 1);
+
+        // Update Days In Office / Days On Site based on Location Name
+        if (locationName !== '') {
+          const currentOnSite = parseInt(monthlyRow.get('Days On Site') || '0');
+          monthlyRow.set('Days On Site', currentOnSite + 1);
+        } else {
+          const currentInOffice = parseInt(monthlyRow.get('Days In Office') || '0');
+          monthlyRow.set('Days In Office', currentInOffice + 1);
+        }
       }
 
       // Update Days Absent
@@ -291,17 +331,23 @@ async function transferDailyDataToMonthly(dateStr) {
 
       // Update Total Points
       const currentPoints = parseFloat(monthlyRow.get('Total Points') || '0');
-      monthlyRow.set('Total Points', (currentPoints + point).toFixed(2));
-
-      // Update Rating (0-10)
-      const currentRating = parseFloat(monthlyRow.get('Rating (0-10)') || '0');
-      const newRating = Math.max(0, Math.min(10, currentRating + point));
-      monthlyRow.set('Rating (0-10)', newRating.toFixed(1));
+      const totalPoints = currentPoints + point;
+      monthlyRow.set('Total Points', totalPoints.toFixed(2));
 
       // Calculate Attendance Rate %
       const daysWorked = parseInt(monthlyRow.get('Days Worked') || '0');
       const daysAbsent = parseInt(monthlyRow.get('Days Absent') || '0');
       const totalDays = daysWorked + daysAbsent;
+
+      // Calculate Average Daily Points
+      const avgDailyPoints = daysWorked > 0 ? totalPoints / daysWorked : 0;
+      monthlyRow.set('Average Daily Points', avgDailyPoints.toFixed(2));
+
+      // Update Rating (0-10) — average of points, not accumulation
+      const totalWorkDays = parseInt(monthlyRow.get('Total Work Days') || '0');
+      const ratingDivisor = totalWorkDays > 0 ? totalWorkDays : (totalDays > 0 ? totalDays : 1);
+      const newRating = Math.max(0, Math.min(10, totalPoints / ratingDivisor));
+      monthlyRow.set('Rating (0-10)', newRating.toFixed(1));
       const attendanceRate = totalDays > 0 ? ((daysWorked / totalDays) * 100).toFixed(1) : '0.0';
       monthlyRow.set('Attendance Rate %', attendanceRate);
 
@@ -328,7 +374,7 @@ async function transferDailyDataToMonthly(dateStr) {
       monthlyRow.set('Last Updated', moment.tz(Config.TIMEZONE).format('YYYY-MM-DD HH:mm:ss'));
 
       await monthlyRow.save();
-      logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h/${requiredHoursDaily.toFixed(2)}h required, point: ${point}, rating: ${newRating.toFixed(1)}`);
+      logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h/${requiredHoursDaily.toFixed(2)}h required, point: ${point}, rating: ${newRating.toFixed(1)}, avgPts: ${avgDailyPoints.toFixed(2)}, penalty: ${penaltyMinutes}min, location: ${locationName || 'office'}`);
     }
 
     // Update hours calendar with daily hours and location data

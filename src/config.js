@@ -22,7 +22,7 @@ class Config {
   static TIMEZONE = process.env.TIMEZONE || 'Asia/Tashkent';
 
   // Timing Configuration
-  static GRACE_PERIOD_MINUTES = parseInt(process.env.GRACE_PERIOD_MINUTES || '7');
+  static GRACE_PERIOD_MINUTES = parseInt(process.env.GRACE_PERIOD_MINUTES || '15');
 
   // Base Points (each day starts with this value)
   static BASE_POINTS = parseInt(process.env.BASE_POINTS || '10');

@@ -379,10 +379,10 @@ class DailyOperations {
 
             // Create moment objects for comparison
             workStartMoment = moment.tz(Config.TIMEZONE).set({ hour: startHour, minute: startMinute, second: 0 });
-            const graceEnd = workStartMoment.clone().add(Config.GRACE_PERIOD_MINUTES, 'minutes');
 
-            // Check if arrived after grace period
-            if (now.isAfter(graceEnd)) {
+            // Check if arrived after grace period (using integer minutes to match calculateLateness)
+            const diffMinutes = now.diff(workStartMoment, 'minutes');
+            if (diffMinutes > Config.GRACE_PERIOD_MINUTES) {
               cameOnTime = 'No';
             }
           }
