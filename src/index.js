@@ -101,7 +101,8 @@ bot.command('monthlyreport', async (ctx) => {
   logger.info(`Admin ${telegramId} triggered monthly report for ${yearMonth}`);
   try {
     await sheetsService.initializeMonthlyReport(yearMonth);
-    await ctx.reply(`✅ Лист Report_${yearMonth} создан!`);
+    await sheetsService.initializeHoursCalendar(yearMonth);
+    await ctx.reply(`✅ Листы Report_${yearMonth} и Hours_${yearMonth} созданы!`);
   } catch (error) {
     logger.error(`Error creating monthly report: ${error.message}`);
     await ctx.reply(`❌ Ошибка: ${error.message}`);
