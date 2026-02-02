@@ -261,9 +261,9 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
 
     employeeRows += `
       <tr>
-        <td>${name}</td>
-        <td class="${statusClass}">${status}</td>
-        <td class="${pointClass}">${point}</td>
+        <td data-label="Сотрудник">${name}</td>
+        <td class="${statusClass}" data-label="Статус">${status}</td>
+        <td class="${pointClass}" data-label="Баллы">${point}</td>
       </tr>
     `;
   }
@@ -373,6 +373,64 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
       color: #6c757d;
       font-size: 14px;
     }
+    @media (max-width: 600px) {
+      body { padding: 10px; }
+      .header { padding: 25px 15px; }
+      .header h1 { font-size: 24px; }
+      .header .date { font-size: 15px; }
+      .stats {
+        padding: 15px;
+        gap: 10px;
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .stat-card { padding: 15px; }
+      .stat-card .number { font-size: 26px; }
+      .stat-card .label { font-size: 12px; }
+      .table-container { padding: 10px; overflow-x: visible; }
+      table, thead, tbody, tr, th, td { display: block; }
+      thead { display: none; }
+      tbody tr {
+        margin-bottom: 12px;
+        border-radius: 12px;
+        padding: 5px 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        border-left: 4px solid #667eea;
+      }
+      tbody td {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 0;
+        border: none;
+        border-radius: 0 !important;
+        border-bottom: 1px solid #f1f3f5;
+        text-align: right;
+        font-size: 14px;
+      }
+      tbody td:last-child { border-bottom: none; }
+      tbody td::before {
+        content: attr(data-label);
+        font-weight: 600;
+        color: #667eea;
+        text-align: left;
+        margin-right: 10px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        flex-shrink: 0;
+      }
+      tbody td:first-child {
+        border-left: none;
+        font-size: 15px;
+        padding-top: 10px;
+      }
+      tbody td:last-child {
+        border-right: none;
+        font-size: 18px;
+        padding-bottom: 10px;
+      }
+      .footer { padding: 15px; font-size: 12px; }
+    }
   </style>
 </head>
 <body>
@@ -472,15 +530,15 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
 
     employeeRows += `
       <tr class="${zoneClass}">
-        <td class="rank">${rankMedal} ${rank}</td>
-        <td class="name">${name}</td>
-        <td class="rating"><strong>${rating}</strong>/10</td>
-        <td>${avgDailyPoints}</td>
-        <td>${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></td>
-        <td>${onTimeArrivals}<br><small>${onTimeRate}%</small></td>
-        <td>${lateArrivalsNotified} / ${lateArrivalsSilent}</td>
-        <td>${totalHoursWorked}<br><small>из ${totalHoursRequired}</small></td>
-        <td>${daysAbsent}</td>
+        <td class="rank" data-label="Место">${rankMedal} ${rank}</td>
+        <td class="name" data-label="Сотрудник">${name}</td>
+        <td class="rating" data-label="Рейтинг"><strong>${rating}</strong>/10</td>
+        <td data-label="Ср. баллы">${avgDailyPoints}</td>
+        <td data-label="Дни работы">${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></td>
+        <td data-label="Вовремя">${onTimeArrivals}<br><small>${onTimeRate}%</small></td>
+        <td data-label="Опоздания">${lateArrivalsNotified} / ${lateArrivalsSilent}</td>
+        <td data-label="Часы">${totalHoursWorked}<br><small>из ${totalHoursRequired}</small></td>
+        <td data-label="Отсутствия">${daysAbsent}</td>
       </tr>
     `;
     rank++;
@@ -595,9 +653,60 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
       font-size: 14px;
     }
     @media (max-width: 768px) {
-      table { font-size: 12px; }
-      tbody td, thead th { padding: 10px 5px; }
-      .header h1 { font-size: 28px; }
+      body { padding: 10px; }
+      .header { padding: 25px 15px; }
+      .header h1 { font-size: 24px; }
+      .header .date { font-size: 15px; }
+      .legend { padding: 15px; gap: 8px; }
+      .legend-item { padding: 8px 12px; font-size: 12px; }
+      .legend-badge { width: 16px; height: 16px; }
+      .table-container { padding: 10px; overflow-x: visible; }
+      table, thead, tbody, tr, th, td { display: block; }
+      thead { display: none; }
+      tbody tr {
+        margin-bottom: 15px;
+        border-radius: 12px;
+        padding: 12px 15px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        border-left-width: 5px !important;
+        background: white;
+      }
+      tbody td {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 6px 0;
+        border: none !important;
+        border-radius: 0 !important;
+        border-bottom: 1px solid #f1f3f5 !important;
+        text-align: right !important;
+        font-size: 14px;
+      }
+      tbody td:last-child { border-bottom: none !important; }
+      tbody td::before {
+        content: attr(data-label);
+        font-weight: 600;
+        color: #667eea;
+        text-align: left;
+        margin-right: 10px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        flex-shrink: 0;
+      }
+      tbody td:first-child {
+        border-left: none !important;
+        padding-left: 0 !important;
+        padding-top: 8px;
+      }
+      tbody td:last-child {
+        border-right: none !important;
+        padding-bottom: 8px;
+      }
+      .name { text-align: right !important; font-size: 15px; }
+      .rank { font-size: 15px; }
+      .rating { font-size: 16px !important; }
+      .footer { padding: 15px; font-size: 12px; }
     }
   </style>
 </head>
