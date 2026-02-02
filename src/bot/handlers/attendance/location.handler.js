@@ -612,6 +612,8 @@ function setupLocationHandler(bot) {
       // Live location accepted
       logger.info(`✅ User ${user.nameFull} sent LIVE location correctly`);
       logger.info(`   Live period: ${ctx.message.location.live_period} seconds`);
+      logger.info(`   Location object keys: ${JSON.stringify(Object.keys(location))}`);
+      logger.info(`   horizontal_accuracy: ${location.horizontal_accuracy}, accuracy: ${location.accuracy}`);
 
       const trackingSeconds = Math.round((Config.TRACKING_DURATION_MINUTES || 0.17) * 60);
       const trackingTime = trackingSeconds < 60
