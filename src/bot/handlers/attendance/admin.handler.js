@@ -1,0 +1,681 @@
+/**
+ * Admin button handlers for attendance
+ * Handles daily report, monthly report, and broadcast message buttons
+ */
+
+const moment = require('moment-timezone');
+const fs = require('fs');
+const path = require('path');
+const sheetsService = require('../../../services/sheets.service');
+const Keyboards = require('../../keyboards/buttons');
+const Config = require('../../../config');
+const logger = require('../../../utils/logger');
+
+/**
+ * Setup admin button handlers
+ */
+function setupAdminHandlers(bot) {
+  // Admin button: Daily report
+  bot.hears('📊 Отчёт за день', async (ctx) => {
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      return;
+    }
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const today = now.format('YYYY-MM-DD');
+
+      await ctx.reply(`📊 Формирую дневной отчёт за ${today}...`);
+
+      const worksheet = await sheetsService.getWorksheet(today);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      if (rows.length === 0) {
+        await ctx.reply('📭 Нет данных за сегодня.', Keyboards.getMainMenu(ctx.from.id));
+        return;
+      }
+
+      await generateAndSendDailyReport(ctx, today, now, rows);
+
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
+      logger.error(`Error in daily report button: ${error.message}`);
+    }
+  });
+
+  // Admin button: Monthly report
+  bot.hears('📈 Отчёт за месяц', async (ctx) => {
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      return;
+    }
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const yearMonth = now.format('YYYY-MM');
+      const sheetName = `Report_${yearMonth}`;
+
+      await ctx.reply(`📊 Формирую месячный отчёт за ${yearMonth}...`);
+      logger.info(`Monthly report requested by admin ${ctx.from.id} for ${yearMonth}`);
+
+      let worksheet = sheetsService.doc.sheetsByTitle[sheetName];
+
+      if (!worksheet) {
+        logger.warn(`Monthly report sheet ${sheetName} doesn't exist, creating...`);
+        await ctx.reply(`⚙️ Создаю отчёт за ${yearMonth}...`);
+
+        await sheetsService.initializeMonthlyReport(yearMonth);
+        worksheet = sheetsService.doc.sheetsByTitle[sheetName];
+
+        if (!worksheet) {
+          throw new Error(`Не удалось создать лист отчёта ${sheetName}`);
+        }
+      }
+
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      if (rows.length === 0) {
+        await ctx.reply(
+          '📭 Отчёт пуст.\n\n' +
+          '💡 Отчёт обновляется автоматически каждый день.\n' +
+          'Или используйте команду /updatereport для ручного обновления.',
+          Keyboards.getMainMenu(ctx.from.id)
+        );
+        return;
+      }
+
+      await generateAndSendMonthlyReport(ctx, yearMonth, now, rows);
+
+    } catch (error) {
+      logger.error(`Error in monthly report button: ${error.message}`, error.stack);
+      await ctx.reply(
+        `❌ Ошибка при формировании отчёта: ${error.message}\n\n` +
+        `Попробуйте команду /updatereport для обновления данных.`,
+        Keyboards.getMainMenu(ctx.from.id)
+      );
+    }
+  });
+
+  // Admin button: Broadcast message
+  bot.hears('📢 Отправить всем сообщение', async (ctx) => {
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      return;
+    }
+
+    await ctx.reply(
+      '📢 Введите сообщение, которое хотите отправить всем сотрудникам:\n\n' +
+      'Или отправьте /cancel для отмены.',
+      Keyboards.getTextInput('Ваше сообщение...')
+    );
+
+    ctx.session = ctx.session || {};
+    ctx.session.awaitingBroadcastMessage = true;
+  });
+
+  // Handle broadcast message input
+  bot.on('text', async (ctx, next) => {
+    if (ctx.session?.awaitingBroadcastMessage) {
+      const message = ctx.message.text;
+
+      if (message === '/cancel') {
+        ctx.session.awaitingBroadcastMessage = false;
+        await ctx.reply('❌ Отправка отменена.', Keyboards.getMainMenu(ctx.from.id));
+        return;
+      }
+
+      try {
+        await ctx.reply('📤 Отправляю сообщение всем сотрудникам...');
+
+        const rosterWorksheet = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
+        await rosterWorksheet.loadHeaderRow();
+        const employees = await rosterWorksheet.getRows();
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const employee of employees) {
+          const telegramId = employee.get('Telegram Id');
+          if (telegramId && telegramId.trim()) {
+            try {
+              await bot.telegram.sendMessage(
+                telegramId,
+                `📢 Сообщение от администрации:\n\n${message}`
+              );
+              successCount++;
+              await new Promise(resolve => setTimeout(resolve, 100));
+            } catch (err) {
+              logger.error(`Failed to send message to ${telegramId}: ${err.message}`);
+              failCount++;
+            }
+          }
+        }
+
+        await ctx.reply(
+          `✅ Сообщение отправлено!\n\n` +
+          `📬 Успешно: ${successCount}\n` +
+          `❌ Ошибки: ${failCount}`,
+          Keyboards.getMainMenu(ctx.from.id)
+        );
+
+        ctx.session.awaitingBroadcastMessage = false;
+        logger.info(`Admin ${ctx.from.id} sent broadcast message to ${successCount} employees`);
+
+      } catch (error) {
+        await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
+        logger.error(`Error in broadcast: ${error.message}`);
+        ctx.session.awaitingBroadcastMessage = false;
+      }
+
+      return;
+    }
+
+    return next();
+  });
+}
+
+/**
+ * Generate and send daily report as HTML file
+ */
+async function generateAndSendDailyReport(ctx, today, now, rows) {
+  let presentCount = 0;
+  let lateCount = 0;
+  let absentCount = 0;
+  let leftEarlyCount = 0;
+  let notifiedLateCount = 0;
+
+  let employeeRows = '';
+  for (const row of rows) {
+    const name = row.get('Name') || 'N/A';
+    const cameOnTime = row.get('Came on time') || '';
+    const whenCome = row.get('When come') || '';
+    const leaveTime = row.get('Leave time') || '';
+    const hoursWorked = row.get('Hours worked') || '0';
+    const leftEarly = row.get('Left early') || '';
+    const absent = row.get('Absent') || '';
+    const whyAbsent = row.get('Why absent') || '';
+    const willBeLate = row.get('will be late') || '';
+    const willBeLateTime = row.get('will be late will come at') || '';
+    const point = row.get('Point') || '0';
+    const pointNum = parseFloat(point);
+
+    let status = '';
+    let statusClass = '';
+    let pointClass = '';
+
+    if (absent.toLowerCase() === 'yes' || absent.toLowerCase() === 'true') {
+      status = `Отсутствует`;
+      if (whyAbsent) status += ` (${whyAbsent})`;
+      statusClass = 'status-absent';
+      absentCount++;
+    } else if (whenCome) {
+      if (cameOnTime.toLowerCase() === 'no' || cameOnTime.toLowerCase() === 'false') {
+        status = `Опоздал (${whenCome})`;
+        statusClass = 'status-late';
+        lateCount++;
+      } else {
+        status = `Вовремя (${whenCome})`;
+        statusClass = 'status-ontime';
+      }
+
+      if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+        status += `<br><small>⏰ Предупредил об опоздании`;
+        if (willBeLateTime.trim()) {
+          status += ` (${willBeLateTime})`;
+        }
+        status += `</small>`;
+        notifiedLateCount++;
+      }
+
+      presentCount++;
+
+      if (leaveTime) {
+        status += `<br><small>Ушёл: ${leaveTime} (${hoursWorked}ч)`;
+        if (leftEarly && leftEarly.toLowerCase().includes('yes')) {
+          status += ` - Рано`;
+          leftEarlyCount++;
+        }
+        status += `</small>`;
+      }
+    } else {
+      status = `Не пришёл`;
+      statusClass = 'status-notarrived';
+
+      if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+        status = `Ожидается`;
+        if (willBeLateTime.trim()) {
+          status += ` (${willBeLateTime})`;
+        }
+        statusClass = 'status-waiting';
+        notifiedLateCount++;
+      }
+    }
+
+    if (pointNum > 0) {
+      pointClass = 'point-good';
+    } else if (pointNum === 0) {
+      pointClass = 'point-neutral';
+    } else {
+      pointClass = 'point-bad';
+    }
+
+    employeeRows += `
+      <tr>
+        <td>${name}</td>
+        <td class="${statusClass}">${status}</td>
+        <td class="${pointClass}">${point}</td>
+      </tr>
+    `;
+  }
+
+  const html = `
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Дневной отчёт - ${today}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 40px;
+      text-align: center;
+    }
+    .header h1 { font-size: 36px; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
+    .header .date { font-size: 20px; opacity: 0.9; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      padding: 30px;
+      background: #f8f9fa;
+    }
+    .stat-card {
+      background: white;
+      padding: 25px;
+      border-radius: 15px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      text-align: center;
+    }
+    .stat-card .number { font-size: 36px; font-weight: bold; margin-bottom: 10px; }
+    .stat-card .label { color: #6c757d; font-size: 14px; }
+    .stat-total .number { color: #667eea; }
+    .stat-present .number { color: #10b981; }
+    .stat-late .number { color: #f59e0b; }
+    .stat-absent .number { color: #ef4444; }
+    .stat-early .number { color: #8b5cf6; }
+    .stat-notified .number { color: #3b82f6; }
+    .table-container { padding: 30px; overflow-x: auto; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0 10px; }
+    thead th {
+      background: #667eea;
+      color: white;
+      padding: 15px;
+      text-align: left;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 12px;
+      letter-spacing: 1px;
+    }
+    thead th:first-child { border-radius: 10px 0 0 10px; }
+    thead th:last-child { border-radius: 0 10px 10px 0; }
+    tbody tr {
+      background: white;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    tbody tr:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    tbody td {
+      padding: 20px 15px;
+      border-top: 1px solid #f1f3f5;
+      border-bottom: 1px solid #f1f3f5;
+    }
+    tbody td:first-child {
+      font-weight: 600;
+      color: #2d3748;
+      border-left: 1px solid #f1f3f5;
+      border-radius: 10px 0 0 10px;
+    }
+    tbody td:last-child {
+      border-right: 1px solid #f1f3f5;
+      border-radius: 0 10px 10px 0;
+      text-align: center;
+      font-weight: bold;
+      font-size: 18px;
+    }
+    .status-ontime { color: #10b981; font-weight: 500; }
+    .status-late { color: #f59e0b; font-weight: 500; }
+    .status-absent { color: #ef4444; font-weight: 500; }
+    .status-notarrived { color: #94a3b8; font-weight: 500; }
+    .status-waiting { color: #3b82f6; font-weight: 500; }
+    .point-good { color: #10b981; }
+    .point-neutral { color: #f59e0b; }
+    .point-bad { color: #ef4444; }
+    .footer {
+      background: #f8f9fa;
+      padding: 20px;
+      text-align: center;
+      color: #6c757d;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Дневной отчёт</h1>
+      <div class="date">${today} | ${now.format('HH:mm:ss')}</div>
+    </div>
+    <div class="stats">
+      <div class="stat-card stat-total"><div class="number">${rows.length}</div><div class="label">Всего сотрудников</div></div>
+      <div class="stat-card stat-present"><div class="number">${presentCount}</div><div class="label">Присутствуют</div></div>
+      <div class="stat-card stat-late"><div class="number">${lateCount}</div><div class="label">Опоздали</div></div>
+      <div class="stat-card stat-notified"><div class="number">${notifiedLateCount}</div><div class="label">Предупредили</div></div>
+      <div class="stat-card stat-absent"><div class="number">${absentCount}</div><div class="label">Отсутствуют</div></div>
+      <div class="stat-card stat-early"><div class="number">${leftEarlyCount}</div><div class="label">Ушли рано</div></div>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Сотрудник</th><th>Статус</th><th>Баллы</th></tr></thead>
+        <tbody>${employeeRows}</tbody>
+      </table>
+    </div>
+    <div class="footer">Сгенерировано системой учёта посещаемости | ${now.format('DD.MM.YYYY HH:mm:ss')}</div>
+  </div>
+</body>
+</html>
+  `;
+
+  const tempDir = path.join(__dirname, '../../../temp');
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const filename = `daily_report_${today}.html`;
+  const filepath = path.join(tempDir, filename);
+  fs.writeFileSync(filepath, html, 'utf8');
+
+  await ctx.replyWithDocument({ source: filepath, filename: filename }, {
+    caption: `Дневной отчёт за ${today}\n\nПрисутствуют: ${presentCount}\nОпоздали: ${lateCount}\nОтсутствуют: ${absentCount}`
+  });
+
+  fs.unlinkSync(filepath);
+}
+
+/**
+ * Generate and send monthly report as HTML file
+ */
+async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
+  const sortedRows = [...rows].sort((a, b) => {
+    const ratingA = parseFloat(a.get('Rating (0-10)') || '0');
+    const ratingB = parseFloat(b.get('Rating (0-10)') || '0');
+    return ratingB - ratingA;
+  });
+
+  let employeeRows = '';
+  let rank = 1;
+  let excellentCount = 0, goodCount = 0, acceptableCount = 0, badCount = 0, unacceptableCount = 0;
+
+  for (const row of sortedRows) {
+    const name = row.get('Name') || 'N/A';
+    const totalWorkDays = row.get('Total Work Days') || '0';
+    const daysWorked = row.get('Days Worked') || '0';
+    const daysAbsent = row.get('Days Absent') || '0';
+    const onTimeArrivals = row.get('On Time Arrivals') || '0';
+    const lateArrivalsNotified = row.get('Late Arrivals (Notified)') || '0';
+    const lateArrivalsSilent = row.get('Late Arrivals (Silent)') || '0';
+    const totalHoursRequired = row.get('Total Hours Required') || '0';
+    const totalHoursWorked = row.get('Total Hours Worked') || '0';
+    const attendanceRate = row.get('Attendance Rate %') || '0';
+    const onTimeRate = row.get('On-Time Rate %') || '0';
+    const rating = row.get('Rating (0-10)') || '0';
+    const ratingZone = row.get('Rating Zone') || '';
+    const avgDailyPoints = row.get('Average Daily Points') || '0';
+
+    let zoneClass = 'zone-unacceptable';
+    const ratingNum = parseFloat(rating);
+    if (ratingNum >= Config.EXCELLENT_ZONE_MIN) {
+      zoneClass = 'zone-excellent';
+      excellentCount++;
+    } else if (ratingNum >= Config.GOOD_ZONE_MIN) {
+      zoneClass = 'zone-good';
+      goodCount++;
+    } else if (ratingNum >= Config.ACCEPTABLE_ZONE_MIN) {
+      zoneClass = 'zone-acceptable';
+      acceptableCount++;
+    } else if (ratingNum >= Config.BAD_ZONE_MIN) {
+      zoneClass = 'zone-bad';
+      badCount++;
+    } else {
+      unacceptableCount++;
+    }
+
+    let rankMedal = '';
+    if (rank === 1) rankMedal = '&#x1F947;';
+    else if (rank === 2) rankMedal = '&#x1F948;';
+    else if (rank === 3) rankMedal = '&#x1F949;';
+
+    employeeRows += `
+      <tr class="${zoneClass}">
+        <td class="rank">${rankMedal} ${rank}</td>
+        <td class="name">${name}</td>
+        <td class="rating"><strong>${rating}</strong>/10</td>
+        <td>${avgDailyPoints}</td>
+        <td>${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></td>
+        <td>${onTimeArrivals}<br><small>${onTimeRate}%</small></td>
+        <td>${lateArrivalsNotified} / ${lateArrivalsSilent}</td>
+        <td>${totalHoursWorked}<br><small>из ${totalHoursRequired}</small></td>
+        <td>${daysAbsent}</td>
+      </tr>
+    `;
+    rank++;
+  }
+
+  const html = `
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Месячный отчёт - ${yearMonth}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 40px;
+      text-align: center;
+    }
+    .header h1 { font-size: 42px; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
+    .header .date { font-size: 20px; opacity: 0.9; }
+    .legend {
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      padding: 30px;
+      background: #f8f9fa;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 20px;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .legend-badge { width: 20px; height: 20px; border-radius: 50%; }
+    .badge-excellent { background: #10b981; }
+    .badge-good { background: #3b82f6; }
+    .badge-acceptable { background: #f59e0b; }
+    .badge-bad { background: #f97316; }
+    .badge-unacceptable { background: #ef4444; }
+    .table-container { padding: 30px; overflow-x: auto; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0 8px; }
+    thead th {
+      background: #667eea;
+      color: white;
+      padding: 15px 10px;
+      text-align: center;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+    }
+    thead th:first-child { border-radius: 10px 0 0 10px; text-align: left; padding-left: 20px; }
+    thead th:last-child { border-radius: 0 10px 10px 0; }
+    tbody tr {
+      background: white;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    tbody tr:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+    tbody td {
+      padding: 18px 10px;
+      text-align: center;
+      border-top: 1px solid #f1f3f5;
+      border-bottom: 1px solid #f1f3f5;
+      font-size: 14px;
+    }
+    tbody td:first-child {
+      border-left: 1px solid #f1f3f5;
+      border-radius: 10px 0 0 10px;
+      text-align: left;
+      padding-left: 20px;
+    }
+    tbody td:last-child { border-right: 1px solid #f1f3f5; border-radius: 0 10px 10px 0; }
+    .rank { font-weight: bold; font-size: 16px; color: #667eea; }
+    .name { font-weight: 600; color: #2d3748; text-align: left !important; font-size: 15px; }
+    .rating { font-size: 18px; font-weight: bold; }
+    .zone-excellent { border-left: 4px solid #10b981; }
+    .zone-excellent .rating { color: #10b981; }
+    .zone-good { border-left: 4px solid #3b82f6; }
+    .zone-good .rating { color: #3b82f6; }
+    .zone-acceptable { border-left: 4px solid #f59e0b; }
+    .zone-acceptable .rating { color: #f59e0b; }
+    .zone-bad { border-left: 4px solid #f97316; }
+    .zone-bad .rating { color: #f97316; }
+    .zone-unacceptable { border-left: 4px solid #ef4444; }
+    .zone-unacceptable .rating { color: #ef4444; }
+    small { color: #6c757d; font-size: 11px; }
+    .footer {
+      background: #f8f9fa;
+      padding: 20px;
+      text-align: center;
+      color: #6c757d;
+      font-size: 14px;
+    }
+    @media (max-width: 768px) {
+      table { font-size: 12px; }
+      tbody td, thead th { padding: 10px 5px; }
+      .header h1 { font-size: 28px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Месячный отчёт</h1>
+      <div class="date">${yearMonth} | Сгенерировано ${now.format('DD.MM.YYYY HH:mm')}</div>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-badge badge-excellent"></div>
+        <span><strong>Отлично:</strong> 10 баллов</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-badge badge-good"></div>
+        <span><strong>Хорошо:</strong> 8-9.9 баллов</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-badge badge-acceptable"></div>
+        <span><strong>Допустимо:</strong> 5-7.9 баллов</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-badge badge-bad"></div>
+        <span><strong>Плохо:</strong> 3-4.9 баллов</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-badge badge-unacceptable"></div>
+        <span><strong>Недопустимо:</strong> &lt;3 баллов</span>
+      </div>
+    </div>
+
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Место</th>
+            <th>Сотрудник</th>
+            <th>Рейтинг</th>
+            <th>Ср. баллы</th>
+            <th>Дни работы</th>
+            <th>Вовремя</th>
+            <th>Опоздания<br><small>Ув./Неув.</small></th>
+            <th>Часы</th>
+            <th>Отсутствия</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${employeeRows}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="footer">
+      Сгенерировано системой учёта посещаемости | ${now.format('DD.MM.YYYY HH:mm:ss')}
+    </div>
+  </div>
+</body>
+</html>
+  `;
+
+  const tempDir = path.join(__dirname, '../../../temp');
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const filename = `monthly_report_${yearMonth}.html`;
+  const filepath = path.join(tempDir, filename);
+  fs.writeFileSync(filepath, html, 'utf8');
+
+  await ctx.replyWithDocument({ source: filepath, filename: filename }, {
+    caption: `Месячный отчёт за ${yearMonth}\n\nОтлично: ${excellentCount}\nХорошо: ${goodCount}\nДопустимо: ${acceptableCount}\nПлохо: ${badCount}\nНедопустимо: ${unacceptableCount}`
+  });
+
+  fs.unlinkSync(filepath);
+}
+
+module.exports = {
+  setupAdminHandlers
+};

@@ -7,6 +7,7 @@ const { setupCheckinHandlers } = require('./checkin.handler');
 const { setupCheckoutHandlers } = require('./checkout.handler');
 const { handleStatus } = require('./status.handler');
 const { setupLocationHandler } = require('./location.handler');
+const { setupAdminHandlers } = require('./admin.handler');
 const {
   getUserOrPromptRegistration,
   getMainMenuKeyboard,
@@ -28,6 +29,9 @@ function setupAttendanceHandlers(bot) {
 
   // Setup location tracking handler
   setupLocationHandler(bot);
+
+  // Setup admin button handlers
+  setupAdminHandlers(bot);
 
   // Setup status handlers
   bot.command('status', async (ctx) => await handleStatus(ctx));
