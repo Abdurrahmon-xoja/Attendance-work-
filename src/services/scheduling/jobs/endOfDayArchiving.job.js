@@ -325,9 +325,7 @@ async function transferDailyDataToMonthly(dateStr) {
       const currentHours = parseFloat(monthlyRow.get('Total Hours Worked') || '0');
       monthlyRow.set('Total Hours Worked', (currentHours + hoursWorked).toFixed(2));
 
-      // Update Total Hours Required
-      const currentRequired = parseFloat(monthlyRow.get('Total Hours Required') || '0');
-      monthlyRow.set('Total Hours Required', (currentRequired + requiredHoursDaily).toFixed(2));
+      // Total Hours Required is static — set once when monthly sheet is created, not updated daily
 
       // Update Total Points
       const currentPoints = parseFloat(monthlyRow.get('Total Points') || '0');
