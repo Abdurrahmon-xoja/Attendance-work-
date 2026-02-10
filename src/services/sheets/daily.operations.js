@@ -737,17 +737,8 @@ class DailyOperations {
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find the employee's row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // FIX: Use getCachedDailyRow to get the SAME row object as other operations
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         throw new Error('Employee row not found');
@@ -809,17 +800,8 @@ class DailyOperations {
       // Initialize daily sheet if needed
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find the employee's row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // FIX: Use getCachedDailyRow to get the SAME row object as other operations
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         throw new Error('Employee row not found');
@@ -1047,17 +1029,9 @@ class DailyOperations {
 
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find employee row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // FIX: Use getCachedDailyRow to get the SAME row object that logEvent modified
+      // Previously used _getCachedDailySheet which could return a different cached row reference
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         logger.warn(`Employee with telegram_id ${telegramId} not found for location update`);
@@ -1141,17 +1115,8 @@ class DailyOperations {
 
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find employee row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // FIX: Use getCachedDailyRow to get the SAME row object as other operations
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         logger.warn(`Employee with telegram_id ${telegramId} not found for verification update`);
@@ -1201,17 +1166,8 @@ class DailyOperations {
 
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find employee row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // FIX: Use getCachedDailyRow to get the SAME row object as other operations
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         logger.warn(`Employee with telegram_id ${telegramId} not found in daily sheet`);
@@ -1256,17 +1212,8 @@ class DailyOperations {
 
       await this.initializeDailySheet(sheetName);
 
-      // Use cached data to reduce API calls
-      const { worksheet, rows } = await this._getCachedDailySheet(sheetName);
-
-      // Find employee row
-      let employeeRow = null;
-      for (const row of rows) {
-        if (row.get('TelegramId')?.toString().trim() === telegramId.toString()) {
-          employeeRow = row;
-          break;
-        }
-      }
+      // FIX: Use getCachedDailyRow to get the SAME row object as other operations
+      const employeeRow = await this.getCachedDailyRow(sheetName, telegramId.toString());
 
       if (!employeeRow) {
         logger.warn(`Employee with telegram_id ${telegramId} not found for departure verification`);
