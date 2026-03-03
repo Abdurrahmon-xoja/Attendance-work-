@@ -366,7 +366,7 @@ function setupRegistrationHandlers(bot) {
 
   // /help command
   bot.command('help', async (ctx) => {
-    const helpText =
+    let helpText =
       '📖 СПРАВКА ПО ИСПОЛЬЗОВАНИЮ БОТА\n\n' +
       '🔹 ОСНОВНЫЕ КОМАНДЫ:\n' +
       '• /start - Регистрация\n' +
@@ -399,6 +399,10 @@ function setupRegistrationHandlers(bot) {
       `• Отсутствие (с предупреждением): -4\n` +
       `• Отсутствие (без предупреждения): -10\n\n` +
       '❓ Если у Вас возникли вопросы, пожалуйста, обратитесь к администратору.';
+
+    if (Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      helpText += '\n\n🛠 АДМИН КОМАНДЫ:\n• /clearcache - Очистить кэш (использовать после добавления/изменения сотрудников в Google Sheets)';
+    }
 
     await ctx.reply(helpText, Keyboards.getMainMenu());
   });

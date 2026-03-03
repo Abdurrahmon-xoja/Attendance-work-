@@ -15,6 +15,28 @@ const logger = require('../../../utils/logger');
  * Setup admin button handlers
  */
 function setupAdminHandlers(bot) {
+  // Admin command: Clear cache
+  bot.command('clearcache', async (ctx) => {
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      return;
+    }
+
+    try {
+      await ctx.reply('🔄 Очистка кэша Google Sheets...');
+      sheetsService._invalidateCache();
+      
+      await ctx.reply('⏳ Загрузка свежих данных из таблиц...');
+      // Warm up cache to make immediate subsequent operations fast
+      await sheetsService.warmupCache();
+      
+      await ctx.reply('✅ Кэш успешно очищен и обновлен. Новые сотрудники добавленные в таблицу теперь доступны для регистрации.', Keyboards.getMainMenu(ctx.from.id));
+      logger.info(`Admin ${ctx.from.id} manually cleared the cache`);
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка при очистке кэша: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
+      logger.error(`Error clearing cache: ${error.message}`);
+    }
+  });
+
   // Admin button: Daily report
   bot.hears('📊 Отчёт за день', async (ctx) => {
     if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
