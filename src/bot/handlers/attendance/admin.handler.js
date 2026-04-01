@@ -517,8 +517,11 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     const daysWorked = row.get('Days Worked') || '0';
     const daysAbsent = row.get('Days Absent') || '0';
     const onTimeArrivals = row.get('On Time Arrivals') || '0';
-    const lateArrivalsNotified = row.get('Late Arrivals (Notified)') || '0';
-    const lateArrivalsSilent = row.get('Late Arrivals (Silent)') || '0';
+    const lateArrivalsNotified = parseInt(row.get('Late Arrivals (Notified)') || '0');
+    const lateArrivalsSilent = parseInt(row.get('Late Arrivals (Silent)') || '0');
+    const totalLateArrivals = lateArrivalsNotified + lateArrivalsSilent;
+    const daysWorkedNum = parseInt(daysWorked) || 0;
+    const lateRate = daysWorkedNum > 0 ? ((totalLateArrivals / daysWorkedNum) * 100).toFixed(1) : '0.0';
     const totalHoursRequired = row.get('Total Hours Required') || '0';
     const totalHoursWorked = row.get('Total Hours Worked') || '0';
     const attendanceRate = row.get('Attendance Rate %') || '0';
@@ -558,7 +561,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
         <td data-label="Ср. баллы">${avgDailyPoints}</td>
         <td data-label="Дни работы">${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></td>
         <td data-label="Вовремя">${onTimeArrivals}<br><small>${onTimeRate}%</small></td>
-        <td data-label="Опоздания">${lateArrivalsNotified} / ${lateArrivalsSilent}</td>
+        <td data-label="Опоздания">${totalLateArrivals}<br><small>${lateRate}%</small></td>
         <td data-label="Часы">${totalHoursWorked}<br><small>из ${totalHoursRequired}</small></td>
         <td data-label="Отсутствия">${daysAbsent}</td>
       </tr>
@@ -772,7 +775,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
             <th>Ср. баллы</th>
             <th>Дни работы</th>
             <th>Вовремя</th>
-            <th>Опоздания<br><small>Ув./Неув.</small></th>
+            <th>Опоздания</th>
             <th>Часы</th>
             <th>Отсутствия</th>
           </tr>

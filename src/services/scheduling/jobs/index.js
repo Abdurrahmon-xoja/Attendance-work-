@@ -10,6 +10,7 @@ const noShowCheckJob = require('./noShowCheck.job');
 const dailyReportToAdminsJob = require('./dailyReportToAdmins.job');
 const monthlyReportToAdminsJob = require('./monthlyReportToAdmins.job');
 const endOfDayArchivingJob = require('./endOfDayArchiving.job');
+const monthlyReminderToUsersJob = require('./monthlyReminderToUsers.job');
 
 module.exports = {
   dailySheetJob,
@@ -18,5 +19,6 @@ module.exports = {
   noShowCheckJob,
   dailyReportToAdminsJob,
   monthlyReportToAdminsJob,
-  endOfDayArchivingJob
+  endOfDayArchivingJob,
+  monthlyReminderToUsersJob
 };

@@ -508,13 +508,13 @@ class MonthlyOperations {
         }
 
         // Calculate rates
+        const totalTrackedDays = daysWorked + daysAbsent;
         const attendanceRate = totalWorkDays > 0 ? ((daysWorked / totalWorkDays) * 100).toFixed(1) : 0;
         const onTimeRate = daysWorked > 0 ? ((onTimeArrivals / daysWorked) * 100).toFixed(1) : 0;
-        const avgDailyPoints = daysWorked > 0 ? (totalPoints / daysWorked).toFixed(2) : 0;
+        const avgDailyPoints = totalTrackedDays > 0 ? (totalPoints / totalTrackedDays).toFixed(2) : 0;
 
         // Calculate rating (0-10 scale)
         // Rating = Total Points / (Days Worked + Days Absent)
-        const totalTrackedDays = daysWorked + daysAbsent;
         const rating = totalTrackedDays > 0 ? Math.max(0, Math.min(10, totalPoints / totalTrackedDays)).toFixed(1) : 0;
 
         // Determine rating zone (5-zone system)

@@ -217,6 +217,9 @@ class SchedulerService {
     // Report sending jobs
     this.setupDailyReportToAdmins();
     this.setupMonthlyReportToAdmins();
+    
+    // Monthly reminder to users
+    this.setupMonthlyReminderToUsers();
 
     // No-show check and archiving jobs
     this.setupNoShowCheck();
@@ -313,6 +316,24 @@ class SchedulerService {
 
     this.jobs.push(job);
     logger.info(`${jobs.monthlyReportToAdminsJob.name} job scheduled (${jobs.monthlyReportToAdminsJob.schedule})`);
+  }
+
+  /**
+   * Setup monthly reminder to users
+   */
+  setupMonthlyReminderToUsers() {
+    const job = cron.schedule(jobs.monthlyReminderToUsersJob.schedule, async () => {
+      try {
+        await jobs.monthlyReminderToUsersJob.execute(this);
+      } catch (error) {
+        logger.error(`Error in monthly reminder to users job: ${error.message}`);
+      }
+    }, {
+      timezone: Config.TIMEZONE
+    });
+
+    this.jobs.push(job);
+    logger.info(`${jobs.monthlyReminderToUsersJob.name} job scheduled (${jobs.monthlyReminderToUsersJob.schedule})`);
   }
 
   /**

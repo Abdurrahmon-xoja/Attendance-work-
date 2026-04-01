@@ -338,7 +338,7 @@ async function transferDailyDataToMonthly(dateStr) {
       const totalDays = daysWorked + daysAbsent;
 
       // Calculate Average Daily Points
-      const avgDailyPoints = daysWorked > 0 ? totalPoints / daysWorked : 0;
+      const avgDailyPoints = totalDays > 0 ? totalPoints / totalDays : 0;
       monthlyRow.set('Average Daily Points', avgDailyPoints.toFixed(2));
 
       // Update Rating (0-10) = Total Points / (Days Worked + Days Absent)
