@@ -556,16 +556,16 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
 
     employeeRows += `
       <tr class="${zoneClass}">
-        <td class="rank" data-label="Место">${rankMedal} ${rank}</td>
-        <td class="name" data-label="Сотрудник">${name}</td>
-        <td class="rating" data-label="Рейтинг"><strong>${rating}</strong>/10</td>
-        <td data-label="Ср. баллы">${avgDailyPoints}</td>
-        <td data-label="Всего баллов">${totalPoints}</td>
-        <td data-label="Дни работы">${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></td>
-        <td data-label="Вовремя">${onTimeArrivals}<br><small>${onTimeRate}%</small></td>
-        <td data-label="Опоздания">${totalLateArrivals}<br><small>${lateRate}%</small></td>
-        <td data-label="Часы">${totalHoursWorked}<br><small>из ${totalHoursRequired}</small></td>
-        <td data-label="Отсутствия">${daysAbsent}</td>
+        <td class="rank" data-label="Место"><span class="td-val">${rankMedal} ${rank}</span></td>
+        <td class="name" data-label="Сотрудник"><span class="td-val">${name}</span></td>
+        <td class="rating" data-label="Рейтинг"><span class="td-val"><strong>${rating}</strong>/10</span></td>
+        <td data-label="Ср. баллы"><span class="td-val">${avgDailyPoints}</span></td>
+        <td data-label="Всего баллов"><span class="td-val">${totalPoints}</span></td>
+        <td data-label="Дни работы"><span class="td-val">${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></span></td>
+        <td data-label="Вовремя"><span class="td-val">${onTimeArrivals}<br><small>${onTimeRate}%</small></span></td>
+        <td data-label="Опоздания"><span class="td-val">${totalLateArrivals}<br><small>${lateRate}%</small></span></td>
+        <td data-label="Часы"><span class="td-val">${totalHoursWorked}<br><small>из ${totalHoursRequired}</small></span></td>
+        <td data-label="Отсутствия"><span class="td-val">${daysAbsent}</span></td>
       </tr>
     `;
     rank++;
@@ -719,6 +719,17 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
         letter-spacing: 0.5px;
         flex-shrink: 0;
       }
+      .td-val {
+        text-align: right;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+      }
+      .rating .td-val {
+        flex-direction: row;
+        gap: 2px;
+        align-items: center;
+      }
       tbody td:first-child {
         border-left: none !important;
         padding-left: 0 !important;
@@ -729,6 +740,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
         padding-bottom: 8px;
       }
       .name { text-align: right !important; font-size: 15px; }
+      .name .td-val { align-items: flex-end; }
       .rank { font-size: 15px; }
       .rating { font-size: 16px !important; }
       .footer { padding: 15px; font-size: 12px; }
