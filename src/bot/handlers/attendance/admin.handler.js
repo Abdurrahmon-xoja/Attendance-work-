@@ -529,6 +529,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     const rating = row.get('Rating (0-10)') || '0';
     const ratingZone = row.get('Rating Zone') || '';
     const avgDailyPoints = row.get('Average Daily Points') || '0';
+    const totalPoints = row.get('Total Points') || '0';
 
     let zoneClass = 'zone-unacceptable';
     const ratingNum = parseFloat(rating);
@@ -559,6 +560,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
         <td class="name" data-label="Сотрудник">${name}</td>
         <td class="rating" data-label="Рейтинг"><strong>${rating}</strong>/10</td>
         <td data-label="Ср. баллы">${avgDailyPoints}</td>
+        <td data-label="Всего баллов">${totalPoints}</td>
         <td data-label="Дни работы">${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></td>
         <td data-label="Вовремя">${onTimeArrivals}<br><small>${onTimeRate}%</small></td>
         <td data-label="Опоздания">${totalLateArrivals}<br><small>${lateRate}%</small></td>
@@ -602,20 +604,18 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     .header .date { font-size: 20px; opacity: 0.9; }
     .legend {
       display: flex;
-      justify-content: center;
-      gap: 20px;
+      flex-direction: column;
+      gap: 12px;
       padding: 30px;
       background: #f8f9fa;
-      flex-wrap: wrap;
+      max-width: fit-content;
+      margin: 0 auto;
     }
     .legend-item {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 10px 20px;
-      background: white;
-      border-radius: 10px;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      gap: 12px;
+      font-size: 16px;
     }
     .legend-badge { width: 20px; height: 20px; border-radius: 50%; }
     .badge-excellent { background: #10b981; }
@@ -628,14 +628,14 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     thead th {
       background: #667eea;
       color: white;
-      padding: 15px 10px;
+      padding: 15px 8px;
       text-align: center;
       font-weight: 600;
       text-transform: uppercase;
       font-size: 11px;
       letter-spacing: 0.5px;
     }
-    thead th:first-child { border-radius: 10px 0 0 10px; text-align: left; padding-left: 20px; }
+    thead th:first-child { border-radius: 10px 0 0 10px; text-align: left; padding-left: 15px; }
     thead th:last-child { border-radius: 0 10px 10px 0; }
     tbody tr {
       background: white;
@@ -643,7 +643,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     }
     tbody tr:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
     tbody td {
-      padding: 18px 10px;
+      padding: 18px 8px;
       text-align: center;
       border-top: 1px solid #f1f3f5;
       border-bottom: 1px solid #f1f3f5;
@@ -653,7 +653,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
       border-left: 1px solid #f1f3f5;
       border-radius: 10px 0 0 10px;
       text-align: left;
-      padding-left: 20px;
+      padding-left: 15px;
     }
     tbody td:last-child { border-right: 1px solid #f1f3f5; border-radius: 0 10px 10px 0; }
     .rank { font-weight: bold; font-size: 16px; color: #667eea; }
@@ -682,8 +682,8 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
       .header { padding: 25px 15px; }
       .header h1 { font-size: 24px; }
       .header .date { font-size: 15px; }
-      .legend { padding: 15px; gap: 8px; }
-      .legend-item { padding: 8px 12px; font-size: 12px; }
+      .legend { padding: 20px; gap: 10px; width: 100%; box-sizing: border-box; }
+      .legend-item { font-size: 14px; }
       .legend-badge { width: 16px; height: 16px; }
       .table-container { padding: 10px; overflow-x: visible; }
       table, thead, tbody, tr, th, td { display: block; }
@@ -773,6 +773,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
             <th>Сотрудник</th>
             <th>Рейтинг</th>
             <th>Ср. баллы</th>
+            <th>Всего баллов</th>
             <th>Дни работы</th>
             <th>Вовремя</th>
             <th>Опоздания</th>
