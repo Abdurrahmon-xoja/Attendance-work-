@@ -504,7 +504,15 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
   const sortedRows = [...rows].sort((a, b) => {
     const ratingA = parseFloat(a.get('Rating (0-10)') || '0');
     const ratingB = parseFloat(b.get('Rating (0-10)') || '0');
-    return ratingB - ratingA;
+    if (ratingB !== ratingA) return ratingB - ratingA;
+
+    const pointsA = parseFloat(a.get('Total Points') || '0');
+    const pointsB = parseFloat(b.get('Total Points') || '0');
+    if (pointsB !== pointsA) return pointsB - pointsA;
+
+    const hoursA = parseFloat(a.get('Total Hours Worked') || '0');
+    const hoursB = parseFloat(b.get('Total Hours Worked') || '0');
+    return hoursB - hoursA;
   });
 
   let employeeRows = '';
