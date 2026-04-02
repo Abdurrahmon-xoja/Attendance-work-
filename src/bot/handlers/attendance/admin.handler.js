@@ -528,7 +528,6 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     const onTimeRate = row.get('On-Time Rate %') || '0';
     const rating = row.get('Rating (0-10)') || '0';
     const ratingZone = row.get('Rating Zone') || '';
-    const avgDailyPoints = row.get('Average Daily Points') || '0';
     const totalPoints = row.get('Total Points') || '0';
 
     let zoneClass = 'zone-unacceptable';
@@ -559,7 +558,6 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
         <td class="rank" data-label="Место"><span class="td-val">${rankMedal} ${rank}</span></td>
         <td class="name" data-label="Сотрудник"><span class="td-val">${name}</span></td>
         <td class="rating" data-label="Рейтинг"><span class="td-val"><strong>${rating}</strong>/10</span></td>
-        <td data-label="Ср. баллы"><span class="td-val">${avgDailyPoints}</span></td>
         <td data-label="Всего баллов"><span class="td-val">${totalPoints}</span></td>
         <td data-label="Дни работы"><span class="td-val">${daysWorked}/${totalWorkDays}<br><small>${attendanceRate}%</small></span></td>
         <td data-label="Вовремя"><span class="td-val">${onTimeArrivals}<br><small>${onTimeRate}%</small></span></td>
@@ -784,7 +782,6 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
             <th>Место</th>
             <th>Сотрудник</th>
             <th>Рейтинг</th>
-            <th>Ср. баллы</th>
             <th>Всего баллов</th>
             <th>Дни работы</th>
             <th>Вовремя</th>

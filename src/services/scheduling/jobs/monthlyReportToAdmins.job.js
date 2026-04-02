@@ -42,31 +42,58 @@ async function sendMonthlyReportToAdmins(yearMonth, schedulerService) {
       return;
     }
 
-    // Calculate stats
+    // Map rows to plain objects for sorting
+    const employees = rows.map(row => ({
+      name:         row.get('Name') || 'N/A',
+      rating:       parseFloat(row.get('Rating (0-10)') || '0'),
+      totalPoints:  parseFloat(row.get('Total Points') || '0'),
+      hoursWorked:  parseFloat(row.get('Total Hours Worked') || '0'),
+      ratingZone:   row.get('Rating Zone') || ''
+    }));
+
+    // Sort by: Rating DESC → Total Points DESC → Hours Worked DESC
+    employees.sort((a, b) => {
+      if (b.rating !== a.rating) return b.rating - a.rating;
+      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+      return b.hoursWorked - a.hoursWorked;
+    });
+
+    // Count zones for summary
     let excellentCount = 0, goodCount = 0, acceptableCount = 0, badCount = 0, unacceptableCount = 0;
-    rows.forEach(row => {
-      const zone = row.get('Rating Zone') || '';
-      if (zone.includes('Excellent')) excellentCount++;
-      else if (zone.includes('Good')) goodCount++;
+    employees.forEach(e => {
+      const zone = e.ratingZone;
+      if (zone.includes('Excellent'))       excellentCount++;
+      else if (zone.includes('Good'))       goodCount++;
       else if (zone.includes('Acceptable')) acceptableCount++;
-      else if (zone.includes('Bad')) badCount++;
+      else if (zone.includes('Bad'))        badCount++;
       else if (zone.includes('Unacceptable')) unacceptableCount++;
     });
+
+    // Build ranked list lines
+    const medals = ['🥇', '🥈', '🥉'];
+    const rankLines = employees.map((e, i) => {
+      const medal  = medals[i] || `   ${i + 1}.`;
+      const ratingStr = e.rating.toFixed(1);
+      const pointsStr = e.totalPoints.toFixed(0);
+      const hoursStr  = e.hoursWorked.toFixed(1);
+      return `${medal} ${e.name}\n` +
+             `    ⭐ ${ratingStr}/10 | 📊 ${pointsStr}pts | ⏱ ${hoursStr}h`;
+    }).join('\n');
+
+    const message =
+      `📊 Месячный рейтинг за ${yearMonth}\n` +
+      `${'─'.repeat(28)}\n` +
+      `${rankLines}\n` +
+      `${'─'.repeat(28)}\n` +
+      `🟢 Отлично: ${excellentCount}  🔵 Хорошо: ${goodCount}\n` +
+      `🟡 Допустимо: ${acceptableCount}  🟠 Плохо: ${badCount}  🔴 Недопустимо: ${unacceptableCount}\n\n` +
+      `Используйте кнопку "📈 Отчёт за месяц" для полного HTML-отчёта.`;
 
     // Send to all admins
     for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
       try {
         await schedulerService.retryTelegramOperation(async () => {
-          await schedulerService.bot.telegram.sendMessage(
-            adminId,
-            `📊 Месячный отчёт за ${yearMonth}\n\n` +
-            `🟢 Excellent: ${excellentCount}\n` +
-            `🔵 Good: ${goodCount}\n` +
-            `🟡 Acceptable: ${acceptableCount}\n` +
-            `🟠 Bad: ${badCount}\n` +
-            `🔴 Unacceptable: ${unacceptableCount}\n\n` +
-            `Используйте кнопку "📈 Отчёт за месяц" для получения полного отчёта.`
-          );
+          await schedulerService.bot.telegram.sendMessage(adminId, message);
         });
         logger.info(`Monthly report sent to admin ${adminId}`);
 
