@@ -537,10 +537,10 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
 }
 
 /**
- * Generate and send monthly report as HTML file
+ * Build monthly report HTML for a group of rows
  */
-async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
-  const sortedRows = [...rows].sort((a, b) => {
+function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
+  const sortedRows = [...groupRows].sort((a, b) => {
     const ratingA = parseFloat(a.get('Rating (0-10)') || '0');
     const ratingB = parseFloat(b.get('Rating (0-10)') || '0');
     if (ratingB !== ratingA) return ratingB - ratingA;
@@ -574,7 +574,6 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     const attendanceRate = row.get('Attendance Rate %') || '0';
     const onTimeRate = row.get('On-Time Rate %') || '0';
     const rating = row.get('Rating (0-10)') || '0';
-    const ratingZone = row.get('Rating Zone') || '';
     const totalPoints = row.get('Total Points') || '0';
 
     let zoneClass = 'zone-unacceptable';
@@ -616,13 +615,12 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     rank++;
   }
 
-  const html = `
-<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Месячный отчёт - ${yearMonth}</title>
+  <title>Месячный отчёт - ${yearMonth} - ${companyLabel}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -795,7 +793,7 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
 <body>
   <div class="container">
     <div class="header">
-      <h1>Месячный отчёт</h1>
+      <h1>Месячный отчёт — ${companyLabel}</h1>
       <div class="date">${yearMonth} | Сгенерировано ${now.format('DD.MM.YYYY HH:mm')}</div>
     </div>
 
@@ -848,23 +846,54 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     </div>
   </div>
 </body>
-</html>
-  `;
+</html>`;
+
+  return { html, excellentCount, goodCount, acceptableCount, badCount, unacceptableCount };
+}
+
+/**
+ * Generate and send monthly report as two HTML files split by company
+ */
+async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
+  // Split rows by company
+  const groups = { 'НО.UZ': [], 'Grace': [] };
+  for (const row of rows) {
+    const company = (row.get('Company') || '').trim();
+    if (company.toLowerCase().includes('grace')) {
+      groups['Grace'].push(row);
+    } else {
+      groups['НО.UZ'].push(row);
+    }
+  }
 
   const tempDir = path.join(__dirname, '../../../temp');
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
   }
 
-  const filename = `monthly_report_${yearMonth}.html`;
-  const filepath = path.join(tempDir, filename);
-  fs.writeFileSync(filepath, html, 'utf8');
+  const reportGroups = [
+    { key: 'НО.UZ', label: 'НО.UZ' },
+    { key: 'Grace', label: 'Grace' }
+  ];
 
-  await ctx.replyWithDocument({ source: filepath, filename: filename }, {
-    caption: `Месячный отчёт за ${yearMonth}\n\nОтлично: ${excellentCount}\nХорошо: ${goodCount}\nДопустимо: ${acceptableCount}\nПлохо: ${badCount}\nНедопустимо: ${unacceptableCount}`
-  });
+  for (const group of reportGroups) {
+    const groupRows = groups[group.key];
+    if (groupRows.length === 0) continue;
 
-  fs.unlinkSync(filepath);
+    const { html, excellentCount, goodCount, acceptableCount, badCount, unacceptableCount } =
+      buildMonthlyHtml(groupRows, yearMonth, group.label, now);
+
+    const safeName = group.label.replace(/[^a-zA-Z0-9]/g, '_');
+    const filename = `monthly_report_${yearMonth}_${safeName}.html`;
+    const filepath = path.join(tempDir, filename);
+    fs.writeFileSync(filepath, html, 'utf8');
+
+    await ctx.replyWithDocument({ source: filepath, filename }, {
+      caption: `Месячный отчёт за ${yearMonth} — ${group.label}\n\nОтлично: ${excellentCount}\nХорошо: ${goodCount}\nДопустимо: ${acceptableCount}\nПлохо: ${badCount}\nНедопустимо: ${unacceptableCount}`
+    });
+
+    fs.unlinkSync(filepath);
+  }
 }
 
 module.exports = {
