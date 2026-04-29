@@ -119,35 +119,64 @@ function setupAdminHandlers(bot) {
     }
   });
 
-  // Admin button: Broadcast message
+  // Admin button: Broadcast to all
   bot.hears('📢 Отправить всем сообщение', async (ctx) => {
     if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
       return;
     }
-
-    await ctx.reply(
-      '📢 Введите сообщение, которое хотите отправить всем сотрудникам:\n\n' +
-      'Или отправьте /cancel для отмены.',
-      Keyboards.getTextInput('Ваше сообщение...')
-    );
-
     ctx.session = ctx.session || {};
     ctx.session.awaitingBroadcastMessage = true;
+    ctx.session.broadcastTarget = 'all';
+    await ctx.reply(
+      '📢 Введите сообщение для ВСЕХ сотрудников:\n\nИли отправьте /cancel для отмены.',
+      Keyboards.getTextInput('Ваше сообщение...')
+    );
+  });
+
+  // Admin button: Broadcast to НО.UZ only
+  bot.hears('📢 Сообщение → НО.UZ', async (ctx) => {
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      return;
+    }
+    ctx.session = ctx.session || {};
+    ctx.session.awaitingBroadcastMessage = true;
+    ctx.session.broadcastTarget = 'НО.UZ';
+    await ctx.reply(
+      '📢 Введите сообщение для сотрудников НО.UZ:\n\nИли отправьте /cancel для отмены.',
+      Keyboards.getTextInput('Ваше сообщение...')
+    );
+  });
+
+  // Admin button: Broadcast to Grace only
+  bot.hears('📢 Сообщение → Grace', async (ctx) => {
+    if (!Config.ADMIN_TELEGRAM_IDS.includes(ctx.from.id)) {
+      return;
+    }
+    ctx.session = ctx.session || {};
+    ctx.session.awaitingBroadcastMessage = true;
+    ctx.session.broadcastTarget = 'Grace';
+    await ctx.reply(
+      '📢 Введите сообщение для сотрудников Grace:\n\nИли отправьте /cancel для отмены.',
+      Keyboards.getTextInput('Ваше сообщение...')
+    );
   });
 
   // Handle broadcast message input
   bot.on('text', async (ctx, next) => {
     if (ctx.session?.awaitingBroadcastMessage) {
       const message = ctx.message.text;
+      const target = ctx.session.broadcastTarget || 'all';
 
       if (message === '/cancel') {
         ctx.session.awaitingBroadcastMessage = false;
+        ctx.session.broadcastTarget = null;
         await ctx.reply('❌ Отправка отменена.', Keyboards.getMainMenu(ctx.from.id));
         return;
       }
 
       try {
-        await ctx.reply('📤 Отправляю сообщение всем сотрудникам...');
+        const targetLabel = target === 'all' ? 'всем сотрудникам' : `сотрудникам ${target}`;
+        await ctx.reply(`📤 Отправляю сообщение ${targetLabel}...`);
 
         const rosterWorksheet = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
         await rosterWorksheet.loadHeaderRow();
@@ -157,19 +186,27 @@ function setupAdminHandlers(bot) {
         let failCount = 0;
 
         for (const employee of employees) {
-          const telegramId = employee.get('Telegram Id');
-          if (telegramId && telegramId.trim()) {
-            try {
-              await bot.telegram.sendMessage(
-                telegramId,
-                `📢 Сообщение от администрации:\n\n${message}`
-              );
-              successCount++;
-              await new Promise(resolve => setTimeout(resolve, 100));
-            } catch (err) {
-              logger.error(`Failed to send message to ${telegramId}: ${err.message}`);
-              failCount++;
-            }
+          const telegramId = (employee.get('Telegram Id') || '').toString().trim();
+          if (!telegramId) continue;
+
+          // Filter by company if a specific target is selected
+          if (target !== 'all') {
+            const company = (employee.get('Company') || '').trim();
+            const isGrace = company.toLowerCase().includes('grace');
+            if (target === 'Grace' && !isGrace) continue;
+            if (target === 'НО.UZ' && isGrace) continue;
+          }
+
+          try {
+            await bot.telegram.sendMessage(
+              telegramId,
+              `📢 Сообщение от администрации:\n\n${message}`
+            );
+            successCount++;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } catch (err) {
+            logger.error(`Failed to send message to ${telegramId}: ${err.message}`);
+            failCount++;
           }
         }
 
@@ -181,12 +218,14 @@ function setupAdminHandlers(bot) {
         );
 
         ctx.session.awaitingBroadcastMessage = false;
-        logger.info(`Admin ${ctx.from.id} sent broadcast message to ${successCount} employees`);
+        ctx.session.broadcastTarget = null;
+        logger.info(`Admin ${ctx.from.id} sent broadcast (${target}) to ${successCount} employees`);
 
       } catch (error) {
         await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
         logger.error(`Error in broadcast: ${error.message}`);
         ctx.session.awaitingBroadcastMessage = false;
+        ctx.session.broadcastTarget = null;
       }
 
       return;

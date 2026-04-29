@@ -13,6 +13,41 @@ const logger = require('../../../utils/logger');
 const schedule = '59 23 28-31 * *';
 
 /**
+ * Build a formatted monthly report message for a group of employees
+ */
+function buildMonthlyMessage(yearMonth, employees, companyLabel) {
+  let excellentCount = 0, goodCount = 0, acceptableCount = 0, badCount = 0, unacceptableCount = 0;
+  employees.forEach(e => {
+    const zone = e.ratingZone;
+    if (zone.includes('Excellent'))         excellentCount++;
+    else if (zone.includes('Good'))         goodCount++;
+    else if (zone.includes('Acceptable'))   acceptableCount++;
+    else if (zone.includes('Bad'))          badCount++;
+    else if (zone.includes('Unacceptable')) unacceptableCount++;
+  });
+
+  const medals = ['🥇', '🥈', '🥉'];
+  const rankLines = employees.map((e, i) => {
+    const medal     = medals[i] || `   ${i + 1}.`;
+    const ratingStr = e.rating.toFixed(1);
+    const pointsStr = e.totalPoints.toFixed(0);
+    const hoursStr  = e.hoursWorked.toFixed(1);
+    return `${medal} ${e.name}\n` +
+           `    ⭐ ${ratingStr}/10 | 📊 ${pointsStr}pts | ⏱ ${hoursStr}h`;
+  }).join('\n');
+
+  return (
+    `📊 Месячный рейтинг за ${yearMonth} — ${companyLabel}\n` +
+    `${'─'.repeat(30)}\n` +
+    `${rankLines}\n` +
+    `${'─'.repeat(30)}\n` +
+    `🟢 Отлично: ${excellentCount}  🔵 Хорошо: ${goodCount}\n` +
+    `🟡 Допустимо: ${acceptableCount}  🟠 Плохо: ${badCount}  🔴 Недопустимо: ${unacceptableCount}\n\n` +
+    `Используйте кнопку "📈 Отчёт за месяц" для полного HTML-отчёта.`
+  );
+}
+
+/**
  * Send monthly report to all admins
  * @param {string} yearMonth - Month in YYYY-MM format
  * @param {Object} schedulerService - Scheduler service instance (for bot)
@@ -42,65 +77,57 @@ async function sendMonthlyReportToAdmins(yearMonth, schedulerService) {
       return;
     }
 
-    // Map rows to plain objects for sorting
-    const employees = rows.map(row => ({
-      name:         row.get('Name') || 'N/A',
-      rating:       parseFloat(row.get('Rating (0-10)') || '0'),
-      totalPoints:  parseFloat(row.get('Total Points') || '0'),
-      hoursWorked:  parseFloat(row.get('Total Hours Worked') || '0'),
-      ratingZone:   row.get('Rating Zone') || ''
-    }));
+    // Split employees into company groups
+    const groupedEmployees = { 'НО.UZ': [], 'Grace': [] };
 
-    // Sort by: Rating DESC → Total Points DESC → Hours Worked DESC
-    employees.sort((a, b) => {
+    for (const row of rows) {
+      const company = (row.get('Company') || '').trim();
+      const employee = {
+        name:        row.get('Name') || 'N/A',
+        rating:      parseFloat(row.get('Rating (0-10)') || '0'),
+        totalPoints: parseFloat(row.get('Total Points') || '0'),
+        hoursWorked: parseFloat(row.get('Total Hours Worked') || '0'),
+        ratingZone:  row.get('Rating Zone') || ''
+      };
+
+      if (company.toLowerCase().includes('grace')) {
+        groupedEmployees['Grace'].push(employee);
+      } else {
+        groupedEmployees['НО.UZ'].push(employee); // default to НО.UZ
+      }
+    }
+
+    // Sort each group: Rating DESC → Total Points DESC → Hours Worked DESC
+    const sortFn = (a, b) => {
       if (b.rating !== a.rating) return b.rating - a.rating;
       if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
       return b.hoursWorked - a.hoursWorked;
-    });
+    };
 
-    // Count zones for summary
-    let excellentCount = 0, goodCount = 0, acceptableCount = 0, badCount = 0, unacceptableCount = 0;
-    employees.forEach(e => {
-      const zone = e.ratingZone;
-      if (zone.includes('Excellent'))       excellentCount++;
-      else if (zone.includes('Good'))       goodCount++;
-      else if (zone.includes('Acceptable')) acceptableCount++;
-      else if (zone.includes('Bad'))        badCount++;
-      else if (zone.includes('Unacceptable')) unacceptableCount++;
-    });
+    const reportGroups = [
+      { key: 'НО.UZ', label: 'НО.UZ' },
+      { key: 'Grace', label: 'Grace' }
+    ];
 
-    // Build ranked list lines
-    const medals = ['🥇', '🥈', '🥉'];
-    const rankLines = employees.map((e, i) => {
-      const medal  = medals[i] || `   ${i + 1}.`;
-      const ratingStr = e.rating.toFixed(1);
-      const pointsStr = e.totalPoints.toFixed(0);
-      const hoursStr  = e.hoursWorked.toFixed(1);
-      return `${medal} ${e.name}\n` +
-             `    ⭐ ${ratingStr}/10 | 📊 ${pointsStr}pts | ⏱ ${hoursStr}h`;
-    }).join('\n');
+    for (const group of reportGroups) {
+      const employees = groupedEmployees[group.key];
+      if (employees.length === 0) continue;
 
-    const message =
-      `📊 Месячный рейтинг за ${yearMonth}\n` +
-      `${'─'.repeat(28)}\n` +
-      `${rankLines}\n` +
-      `${'─'.repeat(28)}\n` +
-      `🟢 Отлично: ${excellentCount}  🔵 Хорошо: ${goodCount}\n` +
-      `🟡 Допустимо: ${acceptableCount}  🟠 Плохо: ${badCount}  🔴 Недопустимо: ${unacceptableCount}\n\n` +
-      `Используйте кнопку "📈 Отчёт за месяц" для полного HTML-отчёта.`;
+      employees.sort(sortFn);
+      const message = buildMonthlyMessage(yearMonth, employees, group.label);
 
-    // Send to all admins
-    for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
-      try {
-        await schedulerService.retryTelegramOperation(async () => {
-          await schedulerService.bot.telegram.sendMessage(adminId, message);
-        });
-        logger.info(`Monthly report sent to admin ${adminId}`);
+      // Send to all admins
+      for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
+        try {
+          await schedulerService.retryTelegramOperation(async () => {
+            await schedulerService.bot.telegram.sendMessage(adminId, message);
+          });
+          logger.info(`Monthly report (${group.label}) sent to admin ${adminId}`);
 
-        // Add delay between admin notifications
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      } catch (err) {
-        logger.error(`Failed to send monthly report to admin ${adminId} after retries: ${err.message}`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (err) {
+          logger.error(`Failed to send monthly report (${group.label}) to admin ${adminId} after retries: ${err.message}`);
+        }
       }
     }
 

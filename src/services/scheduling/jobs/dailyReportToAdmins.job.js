@@ -15,136 +15,127 @@ const logger = require('../../../utils/logger');
 const schedule = '59 23 * * *';
 
 /**
- * Send daily report to all admins as HTML file
- * @param {string} date - Date in YYYY-MM-DD format
- * @param {Object} schedulerService - Scheduler service instance (for bot)
+ * Build company lookup map from roster: telegramId → company, name → company
  */
-async function sendDailyReportToAdmins(date, schedulerService) {
+async function buildCompanyMap() {
+  const companyMap = { byTelegramId: {}, byName: {} };
   try {
-    if (!schedulerService.bot) {
-      logger.error('Bot instance not initialized in scheduler');
-      return;
+    const rosterSheet = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
+    await rosterSheet.loadHeaderRow();
+    const rosterRows = await rosterSheet.getRows();
+    for (const row of rosterRows) {
+      const company = (row.get('Company') || '').trim();
+      const telegramId = (row.get('Telegram Id') || '').toString().trim();
+      const name = (row.get('Name full') || '').trim();
+      if (telegramId) companyMap.byTelegramId[telegramId] = company;
+      if (name) companyMap.byName[name] = company;
     }
+  } catch (err) {
+    logger.error(`Failed to build company map: ${err.message}`);
+  }
+  return companyMap;
+}
 
-    // Check if sheet exists
-    const sheetExists = sheetsService.doc.sheetsByTitle[date];
-    if (!sheetExists) {
-      logger.info(`Sheet ${date} doesn't exist - skipping daily report`);
-      return;
-    }
+/**
+ * Generate HTML report for a specific group of rows
+ */
+function generateHtmlReport(date, rows, companyLabel, now) {
+  let presentCount = 0;
+  let lateCount = 0;
+  let absentCount = 0;
+  let leftEarlyCount = 0;
+  let notifiedLateCount = 0;
 
-    const worksheet = await sheetsService.getWorksheet(date);
-    await worksheet.loadHeaderRow();
-    const rows = await worksheet.getRows();
+  let employeeRows = '';
+  for (const row of rows) {
+    const name = row.get('Name') || 'N/A';
+    const cameOnTime = row.get('Came on time') || '';
+    const whenCome = row.get('When come') || '';
+    const leaveTime = row.get('Leave time') || '';
+    const hoursWorked = row.get('Hours worked') || '0';
+    const leftEarly = row.get('Left early') || '';
+    const absent = row.get('Absent') || '';
+    const whyAbsent = row.get('Why absent') || '';
+    const willBeLate = row.get('will be late') || '';
+    const willBeLateTime = row.get('will be late will come at') || '';
+    const point = row.get('Point') || '0';
+    const pointNum = parseFloat(point);
 
-    if (rows.length === 0) {
-      logger.info('No data for daily report');
-      return;
-    }
+    let status = '';
+    let statusClass = '';
+    let pointClass = '';
 
-    // Generate HTML report
-    const now = moment.tz(Config.TIMEZONE);
-
-    let presentCount = 0;
-    let lateCount = 0;
-    let absentCount = 0;
-    let leftEarlyCount = 0;
-    let notifiedLateCount = 0;
-
-    let employeeRows = '';
-    for (const row of rows) {
-      const name = row.get('Name') || 'N/A';
-      const cameOnTime = row.get('Came on time') || '';
-      const whenCome = row.get('When come') || '';
-      const leaveTime = row.get('Leave time') || '';
-      const hoursWorked = row.get('Hours worked') || '0';
-      const leftEarly = row.get('Left early') || '';
-      const absent = row.get('Absent') || '';
-      const whyAbsent = row.get('Why absent') || '';
-      const willBeLate = row.get('will be late') || '';
-      const willBeLateTime = row.get('will be late will come at') || '';
-      const point = row.get('Point') || '0';
-      const pointNum = parseFloat(point);
-
-      let status = '';
-      let statusClass = '';
-      let pointClass = '';
-
-      if (absent.toLowerCase() === 'yes') {
-        status = `Отсутствует`;
-        if (whyAbsent) status += ` (${whyAbsent})`;
-        statusClass = 'status-absent';
-        absentCount++;
-      } else if (whenCome) {
-        // Check if explicitly marked as late (No or false)
-        if (cameOnTime.toLowerCase() === 'no' || cameOnTime.toLowerCase() === 'false') {
-          status = `Опоздал (${whenCome})`;
-          statusClass = 'status-late';
-          lateCount++;
-        } else {
-          // Default to on-time if 'Yes', 'true', or empty (when marked on time)
-          status = `Вовремя (${whenCome})`;
-          statusClass = 'status-ontime';
-        }
-
-        // Add "will be late" notification if they informed about lateness
-        if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
-          status += `<br><small>⏰ Предупредил об опоздании`;
-          if (willBeLateTime.trim()) {
-            status += ` (${willBeLateTime})`;
-          }
-          status += `</small>`;
-          notifiedLateCount++;
-        }
-
-        presentCount++;
-
-        if (leaveTime) {
-          status += `<br><small>Ушёл: ${leaveTime} (${hoursWorked}ч)`;
-          if (leftEarly && leftEarly.toLowerCase().includes('yes')) {
-            status += ` - Рано`;
-            leftEarlyCount++;
-          }
-          status += `</small>`;
-        }
+    if (absent.toLowerCase() === 'yes') {
+      status = `Отсутствует`;
+      if (whyAbsent) status += ` (${whyAbsent})`;
+      statusClass = 'status-absent';
+      absentCount++;
+    } else if (whenCome) {
+      if (cameOnTime.toLowerCase() === 'no' || cameOnTime.toLowerCase() === 'false') {
+        status = `Опоздал (${whenCome})`;
+        statusClass = 'status-late';
+        lateCount++;
       } else {
-        status = `Не пришёл`;
-        statusClass = 'status-notarrived';
-
-        // Check if person notified they'll be late but hasn't arrived yet
-        if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
-          status = `Ожидается`;
-          if (willBeLateTime.trim()) {
-            status += ` (${willBeLateTime})`;
-          }
-          statusClass = 'status-waiting';
-          notifiedLateCount++;
-        }
+        status = `Вовремя (${whenCome})`;
+        statusClass = 'status-ontime';
       }
 
-      if (pointNum > 0) {
-        pointClass = 'point-good';
-      } else if (pointNum === 0) {
-        pointClass = 'point-neutral';
-      } else {
-        pointClass = 'point-bad';
+      if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+        status += `<br><small>⏰ Предупредил об опоздании`;
+        if (willBeLateTime.trim()) {
+          status += ` (${willBeLateTime})`;
+        }
+        status += `</small>`;
+        notifiedLateCount++;
       }
 
-      employeeRows += `
+      presentCount++;
+
+      if (leaveTime) {
+        status += `<br><small>Ушёл: ${leaveTime} (${hoursWorked}ч)`;
+        if (leftEarly && leftEarly.toLowerCase().includes('yes')) {
+          status += ` - Рано`;
+          leftEarlyCount++;
+        }
+        status += `</small>`;
+      }
+    } else {
+      status = `Не пришёл`;
+      statusClass = 'status-notarrived';
+
+      if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
+        status = `Ожидается`;
+        if (willBeLateTime.trim()) {
+          status += ` (${willBeLateTime})`;
+        }
+        statusClass = 'status-waiting';
+        notifiedLateCount++;
+      }
+    }
+
+    if (pointNum > 0) {
+      pointClass = 'point-good';
+    } else if (pointNum === 0) {
+      pointClass = 'point-neutral';
+    } else {
+      pointClass = 'point-bad';
+    }
+
+    employeeRows += `
         <tr>
           <td>${name}</td>
           <td class="${statusClass}">${status}</td>
           <td class="${pointClass}">${point}</td>
         </tr>
       `;
-    }
+  }
 
-    const html = `<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Дневной отчёт - ${date}</title>
+  <title>Дневной отчёт - ${date} - ${companyLabel}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; min-height: 100vh; }
@@ -187,7 +178,7 @@ async function sendDailyReportToAdmins(date, schedulerService) {
 <body>
   <div class="container">
     <div class="header">
-      <h1>📅 Дневной отчёт</h1>
+      <h1>📅 Дневной отчёт — ${companyLabel}</h1>
       <div class="date">${date} • ${now.format('HH:mm:ss')}</div>
     </div>
     <div class="stats">
@@ -209,34 +200,98 @@ async function sendDailyReportToAdmins(date, schedulerService) {
 </body>
 </html>`;
 
+  return { html, presentCount, lateCount, absentCount };
+}
+
+/**
+ * Send daily report to all admins as HTML file
+ * @param {string} date - Date in YYYY-MM-DD format
+ * @param {Object} schedulerService - Scheduler service instance (for bot)
+ */
+async function sendDailyReportToAdmins(date, schedulerService) {
+  try {
+    if (!schedulerService.bot) {
+      logger.error('Bot instance not initialized in scheduler');
+      return;
+    }
+
+    // Check if sheet exists
+    const sheetExists = sheetsService.doc.sheetsByTitle[date];
+    if (!sheetExists) {
+      logger.info(`Sheet ${date} doesn't exist - skipping daily report`);
+      return;
+    }
+
+    const worksheet = await sheetsService.getWorksheet(date);
+    await worksheet.loadHeaderRow();
+    const rows = await worksheet.getRows();
+
+    if (rows.length === 0) {
+      logger.info('No data for daily report');
+      return;
+    }
+
+    const now = moment.tz(Config.TIMEZONE);
+
+    // Build company map from roster
+    const companyMap = await buildCompanyMap();
+
+    // Split rows into two company groups
+    const groups = { 'НО.UZ': [], 'Grace': [], other: [] };
+    for (const row of rows) {
+      const telegramId = (row.get('TelegramId') || '').toString().trim();
+      const name = (row.get('Name') || '').trim();
+      let company = companyMap.byTelegramId[telegramId] || companyMap.byName[name] || '';
+
+      if (company.toLowerCase().includes('grace')) {
+        groups['Grace'].push(row);
+      } else if (company.toLowerCase().includes('но') || company.toLowerCase().includes('no.uz') || company.toLowerCase().includes('но.uz')) {
+        groups['НО.UZ'].push(row);
+      } else {
+        groups['НО.UZ'].push(row); // default to НО.UZ if company unknown
+      }
+    }
+
     const tempDir = path.join(__dirname, '../../../temp');
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    const filename = `daily_report_${date}.html`;
-    const filepath = path.join(tempDir, filename);
-    fs.writeFileSync(filepath, html, 'utf8');
+    // Generate and send report for each company group
+    const reportGroups = [
+      { key: 'НО.UZ', label: 'НО.UZ' },
+      { key: 'Grace', label: 'Grace' }
+    ];
 
-    // Send to all admins
-    for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
-      try {
-        await schedulerService.bot.telegram.sendDocument(
-          adminId,
-          { source: filepath },
-          {
-            caption: `📊 Дневной отчёт за ${date}\n\n✅ Присутствуют: ${presentCount}\n🕒 Опоздали: ${lateCount}\n❌ Отсутствуют: ${absentCount}`,
-            filename: filename
-          }
-        );
-        logger.info(`Daily report sent to admin ${adminId}`);
-      } catch (err) {
-        logger.error(`Failed to send daily report to admin ${adminId}: ${err.message}`);
+    for (const group of reportGroups) {
+      const groupRows = groups[group.key];
+      if (groupRows.length === 0) continue;
+
+      const { html, presentCount, lateCount, absentCount } = generateHtmlReport(date, groupRows, group.label, now);
+
+      const safeName = group.label.replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `daily_report_${date}_${safeName}.html`;
+      const filepath = path.join(tempDir, filename);
+      fs.writeFileSync(filepath, html, 'utf8');
+
+      for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
+        try {
+          await schedulerService.bot.telegram.sendDocument(
+            adminId,
+            { source: filepath },
+            {
+              caption: `📊 Дневной отчёт за ${date} — ${group.label}\n\n✅ Присутствуют: ${presentCount}\n🕒 Опоздали: ${lateCount}\n❌ Отсутствуют: ${absentCount}`,
+              filename: filename
+            }
+          );
+          logger.info(`Daily report (${group.label}) sent to admin ${adminId}`);
+        } catch (err) {
+          logger.error(`Failed to send daily report (${group.label}) to admin ${adminId}: ${err.message}`);
+        }
       }
-    }
 
-    // Clean up temp file
-    fs.unlinkSync(filepath);
+      fs.unlinkSync(filepath);
+    }
 
   } catch (error) {
     logger.error(`Error in sendDailyReportToAdmins: ${error.message}`);
