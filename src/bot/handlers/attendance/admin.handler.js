@@ -722,6 +722,8 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
       a.sort-btn { font-size: 12px; padding: 6px 11px; }
       .table-container { padding: 10px; overflow-x: visible; }
       table, thead, tbody, tr, th, td { display: block; }
+      /* Override table-row-group so tbody fills full width as a block */
+      #s-rating, .sort-body:target { display: block; }
       thead { display: none; }
       tbody tr {
         margin-bottom: 15px; border-radius: 12px; padding: 12px 15px;
