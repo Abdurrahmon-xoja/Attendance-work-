@@ -725,7 +725,42 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
     thead th.sort-asc, thead th.sort-desc { background: #4a5bc6; }
     .sort-icon { font-size: 10px; opacity: 0.7; margin-left: 4px; }
     thead th.sort-asc .sort-icon, thead th.sort-desc .sort-icon { opacity: 1; }
+    .mobile-sort { display: none; }
     @media (max-width: 768px) {
+      .mobile-sort {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 12px 10px;
+        background: #f8f9fa;
+        border-bottom: 1px solid #e9ecef;
+      }
+      .mobile-sort span {
+        font-size: 11px;
+        font-weight: 700;
+        color: #6c757d;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        width: 100%;
+      }
+      .msort-btn {
+        padding: 7px 12px;
+        border: 1.5px solid #667eea;
+        border-radius: 20px;
+        background: white;
+        color: #667eea;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .msort-btn.active {
+        background: #667eea;
+        color: white;
+      }
+      .msort-icon { font-size: 11px; }
       body { padding: 10px; }
       .header { padding: 25px 15px; }
       .header h1 { font-size: 24px; }
@@ -825,6 +860,16 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
       </div>
     </div>
 
+    <div class="mobile-sort">
+      <span>Сортировать по:</span>
+      <button class="msort-btn" data-col="rating" onclick="sortTable('rating')">Рейтинг <span class="msort-icon">↕</span></button>
+      <button class="msort-btn" data-col="hours" onclick="sortTable('hours')">Часы <span class="msort-icon">↕</span></button>
+      <button class="msort-btn" data-col="points" onclick="sortTable('points')">Баллы <span class="msort-icon">↕</span></button>
+      <button class="msort-btn" data-col="days" onclick="sortTable('days')">Дни <span class="msort-icon">↕</span></button>
+      <button class="msort-btn" data-col="absent" onclick="sortTable('absent')">Отсутствия <span class="msort-icon">↕</span></button>
+      <button class="msort-btn" data-col="late" onclick="sortTable('late')">Опоздания <span class="msort-icon">↕</span></button>
+    </div>
+
     <div class="table-container">
       <table id="reportTable">
         <thead>
@@ -867,13 +912,26 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
         return _sortDir === 'desc' ? bv - av : av - bv;
       });
       rows.forEach(function(r) { tbody.appendChild(r); });
+      // Update desktop header icons
       document.querySelectorAll('thead th.sortable').forEach(function(th) {
         th.classList.remove('sort-asc', 'sort-desc');
         th.querySelector('.sort-icon').textContent = '↕';
       });
-      var active = document.querySelector('thead th[data-col="' + col + '"]');
-      active.classList.add(_sortDir === 'desc' ? 'sort-desc' : 'sort-asc');
-      active.querySelector('.sort-icon').textContent = _sortDir === 'desc' ? '↓' : '↑';
+      var deskActive = document.querySelector('thead th[data-col="' + col + '"]');
+      if (deskActive) {
+        deskActive.classList.add(_sortDir === 'desc' ? 'sort-desc' : 'sort-asc');
+        deskActive.querySelector('.sort-icon').textContent = _sortDir === 'desc' ? '↓' : '↑';
+      }
+      // Update mobile button icons
+      document.querySelectorAll('.msort-btn').forEach(function(btn) {
+        btn.classList.remove('active');
+        btn.querySelector('.msort-icon').textContent = '↕';
+      });
+      var mobActive = document.querySelector('.msort-btn[data-col="' + col + '"]');
+      if (mobActive) {
+        mobActive.classList.add('active');
+        mobActive.querySelector('.msort-icon').textContent = _sortDir === 'desc' ? '↓' : '↑';
+      }
     }
   </script>
 </body>
