@@ -601,7 +601,7 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
         <td class="name" data-label="Сотрудник"><span class="td-val">${e.name}</span></td>
         <td class="rating" data-label="Рейтинг"><span class="td-val"><strong>${e.rating}</strong>/10</span></td>
         <td data-label="Всего баллов"><span class="td-val">${e.totalPoints}</span></td>
-        <td data-label="Дни работы"><span class="td-val">${e.daysWorked}/${e.totalWorkDays}<br><small>${e.attendanceRate}</small></span></td>
+        <td data-label="Дни работы"><span class="td-val">${e.daysWorked}/${e.totalWorkDays}</span></td>
         <td data-label="Вовремя"><span class="td-val">${e.onTimeArrivals}<br><small>${e.onTimeRate}</small></span></td>
         <td data-label="Опоздания"><span class="td-val">${e.totalLate}<br><small>${e.lateRate}</small></span></td>
         <td data-label="Часы"><span class="td-val">${e.totalHoursWorked}<br><small>из ${e.totalHoursRequired}</small></span></td>
