@@ -336,6 +336,7 @@ async function transferDailyDataToMonthly(dateStr) {
       const daysWorked = parseInt(monthlyRow.get('Days Worked') || '0');
       const daysAbsent = parseInt(monthlyRow.get('Days Absent') || '0');
       const totalDays = daysWorked + daysAbsent;
+      const totalWorkDays = parseInt(monthlyRow.get('Total Work Days') || '0');
 
       // Calculate Average Daily Points
       const avgDailyPoints = totalDays > 0 ? totalPoints / totalDays : 0;
@@ -345,7 +346,7 @@ async function transferDailyDataToMonthly(dateStr) {
       const ratingDivisor = totalDays > 0 ? totalDays : 1;
       const newRating = Math.max(0, Math.min(10, totalPoints / ratingDivisor));
       monthlyRow.set('Rating (0-10)', newRating.toFixed(1));
-      const attendanceRate = totalDays > 0 ? ((daysWorked / totalDays) * 100).toFixed(1) : '0.0';
+      const attendanceRate = totalWorkDays > 0 ? ((daysWorked / totalWorkDays) * 100).toFixed(1) : '0.0';
       monthlyRow.set('Attendance Rate %', attendanceRate);
 
       // Calculate On-Time Rate %
