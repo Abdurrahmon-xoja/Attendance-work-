@@ -600,7 +600,7 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
     else if (rank === 3) rankMedal = '&#x1F949;';
 
     employeeRows += `
-      <tr class="${zoneClass}">
+      <tr class="${zoneClass}" data-rating="${rating}" data-points="${totalPoints}" data-hours="${totalHoursWorked}" data-days="${daysWorked}" data-absent="${daysAbsent}" data-late="${totalLateArrivals}">
         <td class="rank" data-label="Место"><span class="td-val">${rankMedal} ${rank}</span></td>
         <td class="name" data-label="Сотрудник"><span class="td-val">${name}</span></td>
         <td class="rating" data-label="Рейтинг"><span class="td-val"><strong>${rating}</strong>/10</span></td>
@@ -720,6 +720,11 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
       color: #6c757d;
       font-size: 14px;
     }
+    thead th.sortable { cursor: pointer; user-select: none; }
+    thead th.sortable:hover { background: #5a6fd6; }
+    thead th.sort-asc, thead th.sort-desc { background: #4a5bc6; }
+    .sort-icon { font-size: 10px; opacity: 0.7; margin-left: 4px; }
+    thead th.sort-asc .sort-icon, thead th.sort-desc .sort-icon { opacity: 1; }
     @media (max-width: 768px) {
       body { padding: 10px; }
       .header { padding: 25px 15px; }
@@ -821,18 +826,18 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
     </div>
 
     <div class="table-container">
-      <table>
+      <table id="reportTable">
         <thead>
           <tr>
             <th>Место</th>
             <th>Сотрудник</th>
-            <th>Рейтинг</th>
-            <th>Всего баллов</th>
-            <th>Дни работы</th>
+            <th class="sortable" data-col="rating" onclick="sortTable('rating')">Рейтинг <span class="sort-icon">↕</span></th>
+            <th class="sortable" data-col="points" onclick="sortTable('points')">Всего баллов <span class="sort-icon">↕</span></th>
+            <th class="sortable" data-col="days" onclick="sortTable('days')">Дни работы <span class="sort-icon">↕</span></th>
             <th>Вовремя</th>
-            <th>Опоздания</th>
-            <th>Часы</th>
-            <th>Отсутствия</th>
+            <th class="sortable" data-col="late" onclick="sortTable('late')">Опоздания <span class="sort-icon">↕</span></th>
+            <th class="sortable" data-col="hours" onclick="sortTable('hours')">Часы <span class="sort-icon">↕</span></th>
+            <th class="sortable" data-col="absent" onclick="sortTable('absent')">Отсутствия <span class="sort-icon">↕</span></th>
           </tr>
         </thead>
         <tbody>
@@ -845,6 +850,32 @@ function buildMonthlyHtml(groupRows, yearMonth, companyLabel, now) {
       Сгенерировано системой учёта посещаемости | ${now.format('DD.MM.YYYY HH:mm:ss')}
     </div>
   </div>
+  <script>
+    var _sortCol = null, _sortDir = 'desc';
+    function sortTable(col) {
+      if (_sortCol === col) {
+        _sortDir = _sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        _sortCol = col;
+        _sortDir = 'desc';
+      }
+      var tbody = document.querySelector('#reportTable tbody');
+      var rows = Array.from(tbody.querySelectorAll('tr'));
+      rows.sort(function(a, b) {
+        var av = parseFloat(a.dataset[col]) || 0;
+        var bv = parseFloat(b.dataset[col]) || 0;
+        return _sortDir === 'desc' ? bv - av : av - bv;
+      });
+      rows.forEach(function(r) { tbody.appendChild(r); });
+      document.querySelectorAll('thead th.sortable').forEach(function(th) {
+        th.classList.remove('sort-asc', 'sort-desc');
+        th.querySelector('.sort-icon').textContent = '↕';
+      });
+      var active = document.querySelector('thead th[data-col="' + col + '"]');
+      active.classList.add(_sortDir === 'desc' ? 'sort-desc' : 'sort-asc');
+      active.querySelector('.sort-icon').textContent = _sortDir === 'desc' ? '↓' : '↑';
+    }
+  </script>
 </body>
 </html>`;
 
