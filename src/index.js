@@ -11,6 +11,7 @@ const sheetsService = require('./services/sheets.service');
 const schedulerService = require('./services/scheduler.service');
 const locationTrackerService = require('./services/locationTracker.service');
 const anomalyDetectorService = require('./services/anomalyDetector.service');
+const geofenceService = require('./services/geofence.service');
 const { registrationWizard, setupRegistrationHandlers } = require('./bot/handlers/registration.handler');
 const { setupAttendanceHandlers } = require('./bot/handlers/attendance'); // Updated to use modular structure
 const { sendBusyNotification } = require('./utils/messageHelper');
@@ -224,6 +225,7 @@ bot.command('adminhelp', async (ctx) => {
     `/hourscalendar [YYYY-MM или YYYY-MM-DD] — Календарь часов (создать / обновить день)\n` +
     `/endday [YYYY-MM-DD] — Архивация дня (ночные → отчёт → Excel → удаление)\n` +
     `/noshow [YYYY-MM-DD] — Проверка no-show\n` +
+    `/checklocation — Проверить, валидна ли локация\n` +
     `/testgif — Тест гифки\n` +
     `/adminhelp — Эта справка`
   );
@@ -441,8 +443,48 @@ const handleLocationUpdate = async (ctx) => {
   }
 };
 
+// /checklocation - Check if a sent location would pass geofence validation
+bot.command('checklocation', async (ctx) => {
+  ctx.session.checkingLocation = true;
+  await ctx.reply(
+    '📍 Отправьте локацию, чтобы проверить, попадает ли она в офисную зону.\n\n' +
+    `Офис 1: ${Config.OFFICE_LATITUDE}, ${Config.OFFICE_LONGITUDE}\n` +
+    `Офис 2: ${Config.OFFICE2_LATITUDE}, ${Config.OFFICE2_LONGITUDE}\n` +
+    `Радиус: ${Config.GEOFENCE_RADIUS_METERS}м`
+  );
+});
+
 // Register handlers for both new and edited location messages
-bot.on('location', handleLocationUpdate);
+bot.on('location', async (ctx) => {
+  if (ctx.session && ctx.session.checkingLocation) {
+    ctx.session.checkingLocation = false;
+
+    const location = ctx.message.location;
+    const geofence = geofenceService.checkOfficeGeofence(location);
+    const accuracy = location.horizontal_accuracy ?? null;
+    const isAccurate = accuracy === null || accuracy <= Config.MAX_ACCURACY_METERS;
+    const isValid = geofence.isInside && isAccurate;
+
+    const lines = [
+      `${isValid ? '✅' : '❌'} Результат проверки локации`,
+      '',
+      `${geofence.isInside ? '✅' : '❌'} Офисная зона: ${geofence.isInside ? 'В зоне' : 'Вне зоны'}`,
+      `📏 Ближайший офис: ${geofence.officeName} — ${geofenceService.formatDistance(geofence.distance)} (радиус ${Config.GEOFENCE_RADIUS_METERS}м)`,
+      accuracy !== null
+        ? `${isAccurate ? '✅' : '⚠️'} Точность GPS: ${Math.round(accuracy)}м (макс. ${Config.MAX_ACCURACY_METERS}м)`
+        : `ℹ️ Точность GPS: не указана`,
+      '',
+      isValid
+        ? '✅ Локация прошла бы проверку.'
+        : '❌ Локация не прошла бы проверку.'
+    ];
+
+    await ctx.reply(lines.join('\n'));
+    return;
+  }
+
+  await handleLocationUpdate(ctx);
+});
 
 // Handle edited messages (live location updates)
 bot.on('edited_message', async (ctx) => {

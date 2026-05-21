@@ -74,6 +74,8 @@ class Config {
   static MIN_UPDATES_FOR_VERIFICATION = parseInt(process.env.MIN_UPDATES_FOR_VERIFICATION || '3');
   static OFFICE_LATITUDE = parseFloat(process.env.OFFICE_LATITUDE || '41.302799');
   static OFFICE_LONGITUDE = parseFloat(process.env.OFFICE_LONGITUDE || '69.314780');
+  static OFFICE2_LATITUDE = parseFloat(process.env.OFFICE2_LATITUDE || '41.304771');
+  static OFFICE2_LONGITUDE = parseFloat(process.env.OFFICE2_LONGITUDE || '69.323595');
   static GEOFENCE_RADIUS_METERS = parseInt(process.env.GEOFENCE_RADIUS_METERS || '200');
   static MAX_ACCURACY_METERS = parseInt(process.env.MAX_ACCURACY_METERS || '50');
   static MAX_JUMP_DISTANCE_METERS = parseInt(process.env.MAX_JUMP_DISTANCE_METERS || '500');

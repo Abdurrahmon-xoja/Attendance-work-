@@ -78,14 +78,14 @@ class GeofenceService {
   }
 
   /**
-   * Get office location from configuration
-   * @returns {Object} Office location { latitude, longitude }
+   * Get all office locations from configuration
+   * @returns {Array} Array of { latitude, longitude, name }
    */
-  getOfficeLocation() {
-    return {
-      latitude: Config.OFFICE_LATITUDE,
-      longitude: Config.OFFICE_LONGITUDE
-    };
+  getOfficeLocations() {
+    return [
+      { latitude: Config.OFFICE_LATITUDE, longitude: Config.OFFICE_LONGITUDE, name: 'Офис 1' },
+      { latitude: Config.OFFICE2_LATITUDE, longitude: Config.OFFICE2_LONGITUDE, name: 'Офис 2' }
+    ];
   }
 
   /**
@@ -97,25 +97,29 @@ class GeofenceService {
   }
 
   /**
-   * Check if location is within office geofence
+   * Check if location is within any office geofence.
+   * Returns result for the nearest office.
    * @param {Object} location - Location to check { latitude, longitude }
-   * @returns {Object} { isInside: boolean, distance: number }
+   * @returns {Object} { isInside: boolean, distance: number, officeName: string }
    */
   checkOfficeGeofence(location) {
-    const officeLocation = this.getOfficeLocation();
+    const offices = this.getOfficeLocations();
     const radius = this.getGeofenceRadius();
 
-    const distance = this.calculateDistance(
-      location.latitude,
-      location.longitude,
-      officeLocation.latitude,
-      officeLocation.longitude
-    );
+    let nearest = null;
+    for (const office of offices) {
+      const distance = this.calculateDistance(
+        location.latitude,
+        location.longitude,
+        office.latitude,
+        office.longitude
+      );
+      if (nearest === null || distance < nearest.distance) {
+        nearest = { distance, officeName: office.name, isInside: distance <= radius };
+      }
+    }
 
-    return {
-      isInside: distance <= radius,
-      distance: distance
-    };
+    return nearest;
   }
 
   /**

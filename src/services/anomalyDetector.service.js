@@ -61,26 +61,20 @@ class AnomalyDetectorService {
     const maxJump = Config.MAX_JUMP_DISTANCE_METERS || 500;
 
     if (distance > maxJump) {
-      // Check if both locations are within or near the office geofence
-      const prevDistanceFromOffice = geofenceService.calculateDistance(
-        prevLocation.latitude,
-        prevLocation.longitude,
-        Config.OFFICE_LATITUDE,
-        Config.OFFICE_LONGITUDE
-      );
-      const currDistanceFromOffice = geofenceService.calculateDistance(
-        currLocation.latitude,
-        currLocation.longitude,
-        Config.OFFICE_LATITUDE,
-        Config.OFFICE_LONGITUDE
-      );
-
       const geofenceRadius = Config.GEOFENCE_RADIUS_METERS || 700;
       const allowedRadius = geofenceRadius + 300; // Allow 300m margin for GPS inaccuracy
 
-      // If BOTH locations are within the allowed area, treat as GPS drift, not fraud
-      const bothNearOffice = prevDistanceFromOffice <= allowedRadius &&
-                            currDistanceFromOffice <= allowedRadius;
+      const isNearAnyOffice = (lat, lng) => {
+        const offices = [
+          { lat: Config.OFFICE_LATITUDE, lng: Config.OFFICE_LONGITUDE },
+          { lat: Config.OFFICE2_LATITUDE, lng: Config.OFFICE2_LONGITUDE }
+        ];
+        return offices.some(o => geofenceService.calculateDistance(lat, lng, o.lat, o.lng) <= allowedRadius);
+      };
+
+      // If BOTH locations are within any office area, treat as GPS drift, not fraud
+      const bothNearOffice = isNearAnyOffice(prevLocation.latitude, prevLocation.longitude) &&
+                             isNearAnyOffice(currLocation.latitude, currLocation.longitude);
 
       if (bothNearOffice && distance < 1000) {
         // GPS jump within office area - likely GPS drift, not fraud
@@ -291,26 +285,20 @@ class AnomalyDetectorService {
     // Only flag if speed is exceeded AND distance is significant
     // This prevents false positives from GPS drift/jumps within the office area
     if (speed > maxSpeed) {
-      // Check if both locations are within or near the geofence
-      const prevDistanceFromOffice = geofenceService.calculateDistance(
-        prevLocation.latitude,
-        prevLocation.longitude,
-        Config.OFFICE_LATITUDE,
-        Config.OFFICE_LONGITUDE
-      );
-      const currDistanceFromOffice = geofenceService.calculateDistance(
-        currLocation.latitude,
-        currLocation.longitude,
-        Config.OFFICE_LATITUDE,
-        Config.OFFICE_LONGITUDE
-      );
-
       const geofenceRadius = Config.GEOFENCE_RADIUS_METERS || 700;
       const allowedRadius = geofenceRadius + 300; // Allow 300m margin for GPS inaccuracy
 
-      // If BOTH locations are within the allowed area, treat as GPS drift, not fraud
-      const bothNearOffice = prevDistanceFromOffice <= allowedRadius &&
-                            currDistanceFromOffice <= allowedRadius;
+      const isNearAnyOffice = (lat, lng) => {
+        const offices = [
+          { lat: Config.OFFICE_LATITUDE, lng: Config.OFFICE_LONGITUDE },
+          { lat: Config.OFFICE2_LATITUDE, lng: Config.OFFICE2_LONGITUDE }
+        ];
+        return offices.some(o => geofenceService.calculateDistance(lat, lng, o.lat, o.lng) <= allowedRadius);
+      };
+
+      // If BOTH locations are within any office area, treat as GPS drift, not fraud
+      const bothNearOffice = isNearAnyOffice(prevLocation.latitude, prevLocation.longitude) &&
+                             isNearAnyOffice(currLocation.latitude, currLocation.longitude);
 
       if (bothNearOffice && distance < 1000) {
         // GPS jump within office area - likely GPS drift, not fraud
