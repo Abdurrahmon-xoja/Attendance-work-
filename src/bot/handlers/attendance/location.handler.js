@@ -550,7 +550,7 @@ async function handleCheckoutLocation(ctx, userId, location) {
  * Setup location handler for both check-in and checkout
  */
 function setupLocationHandler(bot) {
-  bot.on('location', async (ctx) => {
+  bot.on('location', async (ctx, next) => {
     try {
       // IMPORTANT: Convert to string to match the type stored in the map (from Google Sheets)
       const userId = ctx.from.id.toString();
@@ -563,8 +563,8 @@ function setupLocationHandler(bot) {
       const isAwaitingCheckout = awaitingLocationForCheckout.has(userId);
 
       if (!isAwaitingCheckIn && !isAwaitingCheckout) {
-        // Not awaiting location, ignore (will be handled by main location handler in index.js)
-        return;
+        // Not awaiting location — pass to next handler (e.g. /checklocation in index.js)
+        return next();
       }
 
       // HANDLE CHECKOUT LOCATION
