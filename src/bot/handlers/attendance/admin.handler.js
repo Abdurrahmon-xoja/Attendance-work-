@@ -66,8 +66,12 @@ function setupAdminHandlers(bot) {
       await generateAndSendDailyReport(ctx, today, now, rows);
 
     } catch (error) {
-      await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
       logger.error(`Error in daily report button: ${error.message}`);
+      try {
+        await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
+      } catch (replyErr) {
+        logger.error(`Failed to send error reply: ${replyErr.message}`);
+      }
     }
   });
 
@@ -477,23 +481,27 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     const filepath = path.join(tempDir, filename);
     fs.writeFileSync(filepath, html, 'utf8');
 
-    let lastErr;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await ctx.replyWithDocument({ source: filepath, filename }, {
-          caption: `Дневной отчёт за ${today} — ${label}\n\nПрисутствуют: ${presentCount}\nОпоздали: ${lateCount}\nОтсутствуют: ${absentCount}`
-        });
-        lastErr = null;
-        break;
-      } catch (err) {
-        lastErr = err;
-        logger.warn(`sendDocument attempt ${attempt} failed: ${err.message}`);
-        if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
+    try {
+      await ctx.replyWithDocument({ source: filepath, filename }, {
+        caption: `Дневной отчёт за ${today} — ${label}\n\nПрисутствуют: ${presentCount}\nОпоздали: ${lateCount}\nОтсутствуют: ${absentCount}`
+      });
+    } catch (docErr) {
+      logger.warn(`sendDocument failed for ${label}, sending text fallback: ${docErr.message}`);
+      // Fall back to plain text summary so the handler never hangs or corrupts the connection
+      const lines = [`📊 Дневной отчёт за ${today} — ${label}`, ''];
+      for (const row of groupRows) {
+        const name = row.get('Name') || 'N/A';
+        const whenCome = row.get('When come') || '';
+        const absent = (row.get('Absent') || '').toLowerCase();
+        const point = row.get('Point') || '0';
+        let status = whenCome ? `✅ ${whenCome}` : (absent === 'yes' ? '❌ Отсутствует' : '—');
+        lines.push(`${name}: ${status} | ${point}pts`);
       }
+      lines.push('', `Присутствуют: ${presentCount} | Опоздали: ${lateCount} | Отсутствуют: ${absentCount}`);
+      await ctx.reply(lines.join('\n'));
+    } finally {
+      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
     }
-
-    fs.unlinkSync(filepath);
-    if (lastErr) throw lastErr;
   }
 }
 
