@@ -275,18 +275,27 @@ async function sendDailyReportToAdmins(date, schedulerService) {
       fs.writeFileSync(filepath, html, 'utf8');
 
       for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
-        try {
-          await schedulerService.bot.telegram.sendDocument(
-            adminId,
-            { source: filepath },
-            {
-              caption: `📊 Дневной отчёт за ${date} — ${group.label}\n\n✅ Присутствуют: ${presentCount}\n🕒 Опоздали: ${lateCount}\n❌ Отсутствуют: ${absentCount}`,
-              filename: filename
-            }
-          );
-          logger.info(`Daily report (${group.label}) sent to admin ${adminId}`);
-        } catch (err) {
-          logger.error(`Failed to send daily report (${group.label}) to admin ${adminId}: ${err.message}`);
+        let sent = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await schedulerService.bot.telegram.sendDocument(
+              adminId,
+              { source: filepath },
+              {
+                caption: `📊 Дневной отчёт за ${date} — ${group.label}\n\n✅ Присутствуют: ${presentCount}\n🕒 Опоздали: ${lateCount}\n❌ Отсутствуют: ${absentCount}`,
+                filename: filename
+              }
+            );
+            logger.info(`Daily report (${group.label}) sent to admin ${adminId}`);
+            sent = true;
+            break;
+          } catch (err) {
+            logger.warn(`sendDocument attempt ${attempt} failed for admin ${adminId}: ${err.message}`);
+            if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
+          }
+        }
+        if (!sent) {
+          logger.error(`Failed to send daily report (${group.label}) to admin ${adminId} after 3 attempts`);
         }
       }
 

@@ -236,17 +236,35 @@ function setupAdminHandlers(bot) {
 }
 
 /**
- * Generate and send daily report as HTML file
+ * Build company map from roster: telegramId → company, name → company
  */
-async function generateAndSendDailyReport(ctx, today, now, rows) {
-  let presentCount = 0;
-  let lateCount = 0;
-  let absentCount = 0;
-  let leftEarlyCount = 0;
-  let notifiedLateCount = 0;
+async function buildDailyCompanyMap() {
+  const companyMap = { byTelegramId: {}, byName: {} };
+  try {
+    const rosterSheet = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
+    await rosterSheet.loadHeaderRow();
+    const rosterRows = await rosterSheet.getRows();
+    for (const row of rosterRows) {
+      const company = (row.get('Company') || '').trim();
+      const telegramId = (row.get('Telegram Id') || '').toString().trim();
+      const name = (row.get('Name full') || '').trim();
+      if (telegramId) companyMap.byTelegramId[telegramId] = company;
+      if (name) companyMap.byName[name] = company;
+    }
+  } catch (err) {
+    logger.error(`Failed to build company map: ${err.message}`);
+  }
+  return companyMap;
+}
 
+/**
+ * Build HTML rows and stats for a group of daily sheet rows
+ */
+function buildDailyHtmlBody(groupRows) {
+  let presentCount = 0, lateCount = 0, absentCount = 0, leftEarlyCount = 0, notifiedLateCount = 0;
   let employeeRows = '';
-  for (const row of rows) {
+
+  for (const row of groupRows) {
     const name = row.get('Name') || 'N/A';
     const cameOnTime = row.get('Came on time') || '';
     const whenCome = row.get('When come') || '';
@@ -260,9 +278,7 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     const point = row.get('Point') || '0';
     const pointNum = parseFloat(point);
 
-    let status = '';
-    let statusClass = '';
-    let pointClass = '';
+    let status = '', statusClass = '', pointClass = '';
 
     if (absent.toLowerCase() === 'yes' || absent.toLowerCase() === 'true') {
       status = `Отсутствует`;
@@ -278,18 +294,13 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
         status = `Вовремя (${whenCome})`;
         statusClass = 'status-ontime';
       }
-
       if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
         status += `<br><small>⏰ Предупредил об опоздании`;
-        if (willBeLateTime.trim()) {
-          status += ` (${willBeLateTime})`;
-        }
+        if (willBeLateTime.trim()) status += ` (${willBeLateTime})`;
         status += `</small>`;
         notifiedLateCount++;
       }
-
       presentCount++;
-
       if (leaveTime) {
         status += `<br><small>Ушёл: ${leaveTime} (${hoursWorked}ч)`;
         if (leftEarly && leftEarly.toLowerCase().includes('yes')) {
@@ -301,24 +312,15 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     } else {
       status = `Не пришёл`;
       statusClass = 'status-notarrived';
-
       if (willBeLate.toLowerCase() === 'yes' || willBeLate.toLowerCase() === 'true') {
         status = `Ожидается`;
-        if (willBeLateTime.trim()) {
-          status += ` (${willBeLateTime})`;
-        }
+        if (willBeLateTime.trim()) status += ` (${willBeLateTime})`;
         statusClass = 'status-waiting';
         notifiedLateCount++;
       }
     }
 
-    if (pointNum > 0) {
-      pointClass = 'point-good';
-    } else if (pointNum === 0) {
-      pointClass = 'point-neutral';
-    } else {
-      pointClass = 'point-bad';
-    }
+    pointClass = pointNum > 0 ? 'point-good' : pointNum === 0 ? 'point-neutral' : 'point-bad';
 
     employeeRows += `
       <tr>
@@ -329,51 +331,70 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     `;
   }
 
-  const html = `
-<!DOCTYPE html>
+  return { employeeRows, presentCount, lateCount, absentCount, leftEarlyCount, notifiedLateCount };
+}
+
+/**
+ * Generate and send daily report — split by company, one file per company
+ */
+async function generateAndSendDailyReport(ctx, today, now, rows) {
+  // Build company map from roster so we can split daily sheet rows by company
+  const companyMap = await buildDailyCompanyMap();
+
+  // Group rows by company; unknown company defaults to НО.UZ
+  const groups = {};
+  for (const row of rows) {
+    const telegramId = (row.get('TelegramId') || '').toString().trim();
+    const name = (row.get('Name') || '').trim();
+    const company = companyMap.byTelegramId[telegramId] || companyMap.byName[name] || '';
+
+    let label;
+    if (company.toLowerCase().includes('grace')) {
+      label = 'Grace';
+    } else if (
+      company.toLowerCase().includes('но') ||
+      company.toLowerCase().includes('no.uz') ||
+      company.toLowerCase().includes('но.uz')
+    ) {
+      label = 'НО.UZ';
+    } else if (company.trim()) {
+      label = company.trim(); // keep the actual new company name
+    } else {
+      label = 'НО.UZ'; // fallback
+    }
+
+    if (!groups[label]) groups[label] = [];
+    groups[label].push(row);
+  }
+
+  const tempDir = path.join(__dirname, '../../../temp');
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const companyLabels = Object.keys(groups);
+  for (const label of companyLabels) {
+    const groupRows = groups[label];
+    if (groupRows.length === 0) continue;
+
+    const { employeeRows, presentCount, lateCount, absentCount, leftEarlyCount, notifiedLateCount } =
+      buildDailyHtmlBody(groupRows);
+
+    const html = `<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Дневной отчёт - ${today}</title>
+  <title>Дневной отчёт - ${today} - ${label}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      padding: 20px;
-      min-height: 100vh;
-    }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      background: white;
-      border-radius: 20px;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-      overflow: hidden;
-    }
-    .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 40px;
-      text-align: center;
-    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; min-height: 100vh; }
+    .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
+    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; text-align: center; }
     .header h1 { font-size: 36px; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
     .header .date { font-size: 20px; opacity: 0.9; }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 20px;
-      padding: 30px;
-      background: #f8f9fa;
-    }
-    .stat-card {
-      background: white;
-      padding: 25px;
-      border-radius: 15px;
-      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-      text-align: center;
-    }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; padding: 30px; background: #f8f9fa; }
+    .stat-card { background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; }
     .stat-card .number { font-size: 36px; font-weight: bold; margin-bottom: 10px; }
     .stat-card .label { color: #6c757d; font-size: 14px; }
     .stat-total .number { color: #667eea; }
@@ -384,41 +405,14 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     .stat-notified .number { color: #3b82f6; }
     .table-container { padding: 30px; overflow-x: auto; }
     table { width: 100%; border-collapse: separate; border-spacing: 0 10px; }
-    thead th {
-      background: #667eea;
-      color: white;
-      padding: 15px;
-      text-align: left;
-      font-weight: 600;
-      text-transform: uppercase;
-      font-size: 12px;
-      letter-spacing: 1px;
-    }
+    thead th { background: #667eea; color: white; padding: 15px; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 12px; letter-spacing: 1px; }
     thead th:first-child { border-radius: 10px 0 0 10px; }
     thead th:last-child { border-radius: 0 10px 10px 0; }
-    tbody tr {
-      background: white;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
+    tbody tr { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     tbody tr:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-    tbody td {
-      padding: 20px 15px;
-      border-top: 1px solid #f1f3f5;
-      border-bottom: 1px solid #f1f3f5;
-    }
-    tbody td:first-child {
-      font-weight: 600;
-      color: #2d3748;
-      border-left: 1px solid #f1f3f5;
-      border-radius: 10px 0 0 10px;
-    }
-    tbody td:last-child {
-      border-right: 1px solid #f1f3f5;
-      border-radius: 0 10px 10px 0;
-      text-align: center;
-      font-weight: bold;
-      font-size: 18px;
-    }
+    tbody td { padding: 20px 15px; border-top: 1px solid #f1f3f5; border-bottom: 1px solid #f1f3f5; }
+    tbody td:first-child { font-weight: 600; color: #2d3748; border-left: 1px solid #f1f3f5; border-radius: 10px 0 0 10px; }
+    tbody td:last-child { border-right: 1px solid #f1f3f5; border-radius: 0 10px 10px 0; text-align: center; font-weight: bold; font-size: 18px; }
     .status-ontime { color: #10b981; font-weight: 500; }
     .status-late { color: #f59e0b; font-weight: 500; }
     .status-absent { color: #ef4444; font-weight: 500; }
@@ -427,69 +421,25 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     .point-good { color: #10b981; }
     .point-neutral { color: #f59e0b; }
     .point-bad { color: #ef4444; }
-    .footer {
-      background: #f8f9fa;
-      padding: 20px;
-      text-align: center;
-      color: #6c757d;
-      font-size: 14px;
-    }
+    .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #6c757d; font-size: 14px; }
     @media (max-width: 600px) {
       body { padding: 10px; }
       .header { padding: 25px 15px; }
       .header h1 { font-size: 24px; }
       .header .date { font-size: 15px; }
-      .stats {
-        padding: 15px;
-        gap: 10px;
-        grid-template-columns: repeat(2, 1fr);
-      }
+      .stats { padding: 15px; gap: 10px; grid-template-columns: repeat(2, 1fr); }
       .stat-card { padding: 15px; }
       .stat-card .number { font-size: 26px; }
       .stat-card .label { font-size: 12px; }
       .table-container { padding: 10px; overflow-x: visible; }
       table, thead, tbody, tr, th, td { display: block; }
       thead { display: none; }
-      tbody tr {
-        margin-bottom: 12px;
-        border-radius: 12px;
-        padding: 5px 12px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        border-left: 4px solid #667eea;
-      }
-      tbody td {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 0;
-        border: none;
-        border-radius: 0 !important;
-        border-bottom: 1px solid #f1f3f5;
-        text-align: right;
-        font-size: 14px;
-      }
+      tbody tr { margin-bottom: 12px; border-radius: 12px; padding: 5px 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-left: 4px solid #667eea; }
+      tbody td { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border: none; border-radius: 0 !important; border-bottom: 1px solid #f1f3f5; text-align: right; font-size: 14px; }
       tbody td:last-child { border-bottom: none; }
-      tbody td::before {
-        content: attr(data-label);
-        font-weight: 600;
-        color: #667eea;
-        text-align: left;
-        margin-right: 10px;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        flex-shrink: 0;
-      }
-      tbody td:first-child {
-        border-left: none;
-        font-size: 15px;
-        padding-top: 10px;
-      }
-      tbody td:last-child {
-        border-right: none;
-        font-size: 18px;
-        padding-bottom: 10px;
-      }
+      tbody td::before { content: attr(data-label); font-weight: 600; color: #667eea; text-align: left; margin-right: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+      tbody td:first-child { border-left: none; font-size: 15px; padding-top: 10px; }
+      tbody td:last-child { border-right: none; font-size: 18px; padding-bottom: 10px; }
       .footer { padding: 15px; font-size: 12px; }
     }
   </style>
@@ -497,11 +447,11 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
 <body>
   <div class="container">
     <div class="header">
-      <h1>Дневной отчёт</h1>
+      <h1>Дневной отчёт — ${label}</h1>
       <div class="date">${today} | ${now.format('HH:mm:ss')}</div>
     </div>
     <div class="stats">
-      <div class="stat-card stat-total"><div class="number">${rows.length}</div><div class="label">Всего сотрудников</div></div>
+      <div class="stat-card stat-total"><div class="number">${groupRows.length}</div><div class="label">Всего сотрудников</div></div>
       <div class="stat-card stat-present"><div class="number">${presentCount}</div><div class="label">Присутствуют</div></div>
       <div class="stat-card stat-late"><div class="number">${lateCount}</div><div class="label">Опоздали</div></div>
       <div class="stat-card stat-notified"><div class="number">${notifiedLateCount}</div><div class="label">Предупредили</div></div>
@@ -517,23 +467,31 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     <div class="footer">Сгенерировано системой учёта посещаемости | ${now.format('DD.MM.YYYY HH:mm:ss')}</div>
   </div>
 </body>
-</html>
-  `;
+</html>`;
 
-  const tempDir = path.join(__dirname, '../../../temp');
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
+    const safeName = label.replace(/[^a-zA-Z0-9]/g, '_');
+    const filename = `daily_report_${today}_${safeName}.html`;
+    const filepath = path.join(tempDir, filename);
+    fs.writeFileSync(filepath, html, 'utf8');
+
+    let lastErr;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await ctx.replyWithDocument({ source: filepath, filename }, {
+          caption: `Дневной отчёт за ${today} — ${label}\n\nПрисутствуют: ${presentCount}\nОпоздали: ${lateCount}\nОтсутствуют: ${absentCount}`
+        });
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        logger.warn(`sendDocument attempt ${attempt} failed: ${err.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+    }
+
+    fs.unlinkSync(filepath);
+    if (lastErr) throw lastErr;
   }
-
-  const filename = `daily_report_${today}.html`;
-  const filepath = path.join(tempDir, filename);
-  fs.writeFileSync(filepath, html, 'utf8');
-
-  await ctx.replyWithDocument({ source: filepath, filename: filename }, {
-    caption: `Дневной отчёт за ${today}\n\nПрисутствуют: ${presentCount}\nОпоздали: ${lateCount}\nОтсутствуют: ${absentCount}`
-  });
-
-  fs.unlinkSync(filepath);
 }
 
 /**
@@ -843,11 +801,23 @@ async function generateAndSendMonthlyReport(ctx, yearMonth, now, rows) {
     const filepath = path.join(tempDir, filename);
     fs.writeFileSync(filepath, html, 'utf8');
 
-    await ctx.replyWithDocument({ source: filepath, filename }, {
-      caption: `Месячный отчёт за ${yearMonth} — ${group.label}\n\nОтлично: ${excellentCount}\nХорошо: ${goodCount}\nДопустимо: ${acceptableCount}\nПлохо: ${badCount}\nНедопустимо: ${unacceptableCount}`
-    });
+    let lastErr;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await ctx.replyWithDocument({ source: filepath, filename }, {
+          caption: `Месячный отчёт за ${yearMonth} — ${group.label}\n\nОтлично: ${excellentCount}\nХорошо: ${goodCount}\nДопустимо: ${acceptableCount}\nПлохо: ${badCount}\nНедопустимо: ${unacceptableCount}`
+        });
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        logger.warn(`sendDocument attempt ${attempt} failed: ${err.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+    }
 
     fs.unlinkSync(filepath);
+    if (lastErr) throw lastErr;
   }
 }
 
