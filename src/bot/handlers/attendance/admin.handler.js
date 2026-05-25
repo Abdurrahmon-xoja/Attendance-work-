@@ -471,35 +471,33 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
 </body>
 </html>`;
 
-    // Always send text summary first — guaranteed to arrive even if file upload fails
-    const lines = [`📊 Отчёт за ${today} — ${label}\n`];
-    for (const row of groupRows) {
-      const name = row.get('Name') || 'N/A';
-      const whenCome = row.get('When come') || '';
-      const absent = (row.get('Absent') || '').toLowerCase();
-      const point = row.get('Point') || '0';
-      const status = whenCome ? `✅ ${whenCome}` : (absent === 'yes' ? '❌ Отсутствует' : '⏳ Не пришёл');
-      lines.push(`${name}: ${status} | ${point}pts`);
-    }
-    lines.push(`\nПрисутствуют: ${presentCount} | Опоздали: ${lateCount} | Отсутствуют: ${absentCount}`);
-    await ctx.reply(lines.join('\n'));
-
-    // Try to send HTML as Buffer (no file I/O, faster) with a strict 8s timeout
-    // so a socket hang up fails fast instead of hanging 30+ seconds
+    // Send HTML via Node.js built-in fetch (undici) — bypasses node-fetch/Telegraf multipart issues
     const safeName = label.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `daily_report_${today}_${safeName}.html`;
-    const htmlBuffer = Buffer.from(html, 'utf8');
     try {
-      await Promise.race([
-        ctx.replyWithDocument({ source: htmlBuffer, filename }, {
-          caption: `HTML отчёт за ${today} — ${label}`
+      const formData = new FormData();
+      formData.append('chat_id', String(ctx.chat.id));
+      formData.append('caption', `📊 Отчёт за ${today} — ${label}\n\nПрисутствуют: ${presentCount} | Опоздали: ${lateCount} | Отсутствуют: ${absentCount}`);
+      formData.append('document', new Blob([html], { type: 'text/html' }), filename);
+
+      const res = await Promise.race([
+        fetch(`https://api.telegram.org/bot${Config.BOT_TOKEN}/sendDocument`, {
+          method: 'POST',
+          body: formData
         }),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('upload timeout')), 8000)
+          setTimeout(() => reject(new Error('upload timeout')), 15000)
         )
       ]);
+
+      if (!res.ok) {
+        const body = await res.text();
+        logger.warn(`sendDocument (native fetch) failed for ${label}: ${res.status} ${body}`);
+        await ctx.reply(`❌ Не удалось отправить HTML отчёт (${label}): ${res.status}`);
+      }
     } catch (docErr) {
-      logger.warn(`sendDocument failed for ${label} (text already sent): ${docErr.message}`);
+      logger.warn(`sendDocument (native fetch) error for ${label}: ${docErr.message}`);
+      await ctx.reply(`❌ Не удалось отправить HTML отчёт (${label}): ${docErr.message}`);
     }
   }
 }
