@@ -49,13 +49,14 @@ function setupAdminHandlers(bot) {
 
       await ctx.reply(`📊 Формирую дневной отчёт за ${today}...`);
 
-      // Use cached daily sheet to avoid extra quota usage
       if (!sheetsService.doc.sheetsByTitle[today]) {
         await ctx.reply('📭 Нет данных за сегодня.', Keyboards.getMainMenu(ctx.from.id));
         return;
       }
 
-      const { rows } = await sheetsService._getCachedDailySheet(today);
+      const worksheet = await sheetsService.getWorksheet(today);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
 
       if (rows.length === 0) {
         await ctx.reply('📭 Нет данных за сегодня.', Keyboards.getMainMenu(ctx.from.id));
