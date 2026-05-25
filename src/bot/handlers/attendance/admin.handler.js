@@ -236,14 +236,12 @@ function setupAdminHandlers(bot) {
 }
 
 /**
- * Build company map from roster: telegramId → company, name → company
+ * Build company map from cached roster: telegramId → company, name → company
  */
 async function buildDailyCompanyMap() {
   const companyMap = { byTelegramId: {}, byName: {} };
   try {
-    const rosterSheet = await sheetsService.getWorksheet(Config.SHEET_ROSTER);
-    await rosterSheet.loadHeaderRow();
-    const rosterRows = await rosterSheet.getRows();
+    const rosterRows = await sheetsService._getCachedRoster();
     for (const row of rosterRows) {
       const company = (row.get('Company') || '').trim();
       const telegramId = (row.get('Telegram Id') || '').toString().trim();
