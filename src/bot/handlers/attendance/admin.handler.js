@@ -374,11 +374,6 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     groups[label].push(row);
   }
 
-  const tempDir = path.join(__dirname, '../../../temp');
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-  }
-
   const companyLabels = Object.keys(groups);
   for (const label of companyLabels) {
     const groupRows = groups[label];
@@ -489,19 +484,22 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
     lines.push(`\nПрисутствуют: ${presentCount} | Опоздали: ${lateCount} | Отсутствуют: ${absentCount}`);
     await ctx.reply(lines.join('\n'));
 
-    // Then try to send the HTML file as a bonus (nice formatting)
+    // Try to send HTML as Buffer (no file I/O, faster) with a strict 8s timeout
+    // so a socket hang up fails fast instead of hanging 30+ seconds
     const safeName = label.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `daily_report_${today}_${safeName}.html`;
-    const filepath = path.join(tempDir, filename);
-    fs.writeFileSync(filepath, html, 'utf8');
+    const htmlBuffer = Buffer.from(html, 'utf8');
     try {
-      await ctx.replyWithDocument({ source: filepath, filename }, {
-        caption: `HTML отчёт за ${today} — ${label}`
-      });
+      await Promise.race([
+        ctx.replyWithDocument({ source: htmlBuffer, filename }, {
+          caption: `HTML отчёт за ${today} — ${label}`
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('upload timeout')), 8000)
+        )
+      ]);
     } catch (docErr) {
-      logger.warn(`sendDocument failed for ${label} (text summary already sent): ${docErr.message}`);
-    } finally {
-      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+      logger.warn(`sendDocument failed for ${label} (text already sent): ${docErr.message}`);
     }
   }
 }
