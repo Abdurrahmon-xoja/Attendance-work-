@@ -476,29 +476,30 @@ async function generateAndSendDailyReport(ctx, today, now, rows) {
 </body>
 </html>`;
 
+    // Always send text summary first — guaranteed to arrive even if file upload fails
+    const lines = [`📊 Отчёт за ${today} — ${label}\n`];
+    for (const row of groupRows) {
+      const name = row.get('Name') || 'N/A';
+      const whenCome = row.get('When come') || '';
+      const absent = (row.get('Absent') || '').toLowerCase();
+      const point = row.get('Point') || '0';
+      const status = whenCome ? `✅ ${whenCome}` : (absent === 'yes' ? '❌ Отсутствует' : '⏳ Не пришёл');
+      lines.push(`${name}: ${status} | ${point}pts`);
+    }
+    lines.push(`\nПрисутствуют: ${presentCount} | Опоздали: ${lateCount} | Отсутствуют: ${absentCount}`);
+    await ctx.reply(lines.join('\n'));
+
+    // Then try to send the HTML file as a bonus (nice formatting)
     const safeName = label.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `daily_report_${today}_${safeName}.html`;
     const filepath = path.join(tempDir, filename);
     fs.writeFileSync(filepath, html, 'utf8');
-
     try {
       await ctx.replyWithDocument({ source: filepath, filename }, {
-        caption: `Дневной отчёт за ${today} — ${label}\n\nПрисутствуют: ${presentCount}\nОпоздали: ${lateCount}\nОтсутствуют: ${absentCount}`
+        caption: `HTML отчёт за ${today} — ${label}`
       });
     } catch (docErr) {
-      logger.warn(`sendDocument failed for ${label}, sending text fallback: ${docErr.message}`);
-      // Fall back to plain text summary so the handler never hangs or corrupts the connection
-      const lines = [`📊 Дневной отчёт за ${today} — ${label}`, ''];
-      for (const row of groupRows) {
-        const name = row.get('Name') || 'N/A';
-        const whenCome = row.get('When come') || '';
-        const absent = (row.get('Absent') || '').toLowerCase();
-        const point = row.get('Point') || '0';
-        let status = whenCome ? `✅ ${whenCome}` : (absent === 'yes' ? '❌ Отсутствует' : '—');
-        lines.push(`${name}: ${status} | ${point}pts`);
-      }
-      lines.push('', `Присутствуют: ${presentCount} | Опоздали: ${lateCount} | Отсутствуют: ${absentCount}`);
-      await ctx.reply(lines.join('\n'));
+      logger.warn(`sendDocument failed for ${label} (text summary already sent): ${docErr.message}`);
     } finally {
       if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
     }
