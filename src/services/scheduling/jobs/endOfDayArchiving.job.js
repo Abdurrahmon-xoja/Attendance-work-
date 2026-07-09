@@ -21,6 +21,78 @@ const logger = require('../../../utils/logger');
 // Schedule: Every day at 00:00 (midnight)
 const schedule = '0 0 * * *';
 
+// Longer retry schedule than the sheets-service default: midnight batches hit
+// the per-minute write quota, so 2s/4s/8s/16s/32s rides out the quota window
+const retry = (operation) => sheetsService.quotaHandler.retryOperation(operation, 5, 2000);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const WRITE_THROTTLE_MS = 1100;
+
+// Archive log sheet: one row per date, a timestamp per completed step.
+// Makes end-of-day idempotent (safe /endday re-runs, startup catch-up).
+const ARCHIVE_LOG_SHEET = '_ArchiveLog';
+const ARCHIVE_LOG_HEADERS = ['Date', 'TransferredAt', 'HoursAt', 'ReportSentAt', 'DeletedAt'];
+
+/**
+ * Send an alert message to all configured admins
+ * @param {Object} schedulerService - Scheduler service instance
+ * @param {string} message - Message text
+ */
+async function notifyAdmins(schedulerService, message) {
+  if (!schedulerService || !schedulerService.bot || typeof schedulerService.sendMessageSafe !== 'function') {
+    logger.warn(`Cannot notify admins (no bot instance): ${message}`);
+    return;
+  }
+  for (const adminId of Config.ADMIN_TELEGRAM_IDS) {
+    try {
+      await schedulerService.sendMessageSafe(adminId, message);
+    } catch (error) {
+      logger.error(`Failed to notify admin ${adminId}: ${error.message}`);
+    }
+  }
+}
+
+/**
+ * Get (or create) the archive log row for a date
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @returns {Object|null} GoogleSpreadsheetRow for the date, or null on failure
+ */
+async function getArchiveLogRow(dateStr) {
+  try {
+    let sheet = sheetsService.doc.sheetsByTitle[ARCHIVE_LOG_SHEET];
+    if (!sheet) {
+      sheet = await retry(() => sheetsService.doc.addSheet({
+        title: ARCHIVE_LOG_SHEET,
+        headerValues: ARCHIVE_LOG_HEADERS
+      }));
+    }
+    await retry(() => sheet.loadHeaderRow());
+    const rows = await retry(() => sheet.getRows());
+    let row = rows.find(r => (r.get('Date') || '').toString().trim() === dateStr);
+    if (!row) {
+      row = await retry(() => sheet.addRow({ 'Date': dateStr }));
+    }
+    return row;
+  } catch (error) {
+    logger.error(`Error accessing archive log: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Stamp a step as completed in the archive log
+ * @param {Object|null} logRow - Row from getArchiveLogRow (may be null)
+ * @param {string} column - One of TransferredAt/HoursAt/ReportSentAt/DeletedAt
+ */
+async function stampArchiveLog(logRow, column) {
+  if (!logRow) return;
+  try {
+    logRow.set(column, moment.tz(Config.TIMEZONE).format('YYYY-MM-DD HH:mm:ss'));
+    await retry(() => logRow.save());
+  } catch (error) {
+    logger.error(`Error stamping archive log ${column}: ${error.message}`);
+  }
+}
+
 /**
  * Handle employees who are still working at midnight
  * @param {string} dateStr - Date in YYYY-MM-DD format
@@ -58,7 +130,7 @@ async function handleOvernightWorkers(dateStr, schedulerService) {
         const hoursWorked = minutesWorked / 60;
         row.set('Hours worked', hoursWorked.toFixed(2));
 
-        await row.save();
+        await retry(() => row.save());
 
         logger.info(`Auto-ended work for overnight worker: ${name} (${telegramId}) at ${endTime}`);
 
@@ -104,6 +176,7 @@ async function handleOvernightWorkers(dateStr, schedulerService) {
  */
 async function transferDailyDataToMonthly(dateStr) {
   try {
+    transferDailyDataToMonthly.lastError = null;
     const yearMonth = moment.tz(dateStr, Config.TIMEZONE).format('YYYY-MM');
     const reportSheetName = `Report_${yearMonth}`;
 
@@ -111,7 +184,10 @@ async function transferDailyDataToMonthly(dateStr) {
     let monthlySheet = sheetsService.doc.sheetsByTitle[reportSheetName];
     if (!monthlySheet) {
       logger.info(`Creating monthly report ${reportSheetName}`);
-      await sheetsService.initializeMonthlyReport(yearMonth);
+      const initialized = await sheetsService.initializeMonthlyReport(yearMonth);
+      if (!initialized) {
+        throw new Error(`Failed to initialize monthly report ${reportSheetName}`);
+      }
       monthlySheet = await sheetsService.getWorksheet(reportSheetName);
     } else {
       monthlySheet = await sheetsService.getWorksheet(reportSheetName);
@@ -119,12 +195,28 @@ async function transferDailyDataToMonthly(dateStr) {
 
     // Get daily data
     const dailySheet = await sheetsService.getWorksheet(dateStr);
-    await dailySheet.loadHeaderRow();
-    const dailyRows = await dailySheet.getRows();
+    await retry(() => dailySheet.loadHeaderRow());
+    const dailyRows = await retry(() => dailySheet.getRows());
 
-    // Load monthly sheet
-    await monthlySheet.loadHeaderRow();
-    const monthlyRows = await monthlySheet.getRows();
+    // Load monthly sheet. If a previous month-creation run crashed after
+    // creating the sheet but before writing headers (this broke July 2026),
+    // the sheet exists but is empty — repair it instead of failing every night.
+    try {
+      await retry(() => monthlySheet.loadHeaderRow());
+    } catch (headerError) {
+      if (headerError.message && headerError.message.includes('No values in the header row')) {
+        logger.warn(`${reportSheetName} exists but has no header row - repairing via initializeMonthlyReport`);
+        const repaired = await sheetsService.initializeMonthlyReport(yearMonth);
+        if (!repaired) {
+          throw new Error(`Failed to repair broken monthly report ${reportSheetName}`);
+        }
+        monthlySheet = await sheetsService.getWorksheet(reportSheetName);
+        await retry(() => monthlySheet.loadHeaderRow());
+      } else {
+        throw headerError;
+      }
+    }
+    const monthlyRows = await retry(() => monthlySheet.getRows());
 
     // Transfer data for each employee
     for (const dailyRow of dailyRows) {
@@ -194,7 +286,7 @@ async function transferDailyDataToMonthly(dateStr) {
           const totalHoursRequired = totalWorkDays * dailyHours;
 
           // Add new row to monthly report
-          monthlyRow = await monthlySheet.addRow({
+          monthlyRow = await retry(() => monthlySheet.addRow({
             'Name': name,
             'Telegram ID': telegramId,
             'Company': company,
@@ -221,7 +313,7 @@ async function transferDailyDataToMonthly(dateStr) {
             'Rating (0-10)': 0,
             'Rating Zone': '⚪',
             'Last Updated': ''
-          });
+          }));
 
           // Add to the monthlyRows array so we can continue processing
           monthlyRows.push(monthlyRow);
@@ -371,16 +463,15 @@ async function transferDailyDataToMonthly(dateStr) {
       // Update Last Updated
       monthlyRow.set('Last Updated', moment.tz(Config.TIMEZONE).format('YYYY-MM-DD HH:mm:ss'));
 
-      await monthlyRow.save();
+      await retry(() => monthlyRow.save());
+      await sleep(WRITE_THROTTLE_MS);
       logger.info(`Updated monthly report for ${name}: +${hoursWorked.toFixed(2)}h/${requiredHoursDaily.toFixed(2)}h required, point: ${point}, rating: ${newRating.toFixed(1)}, avgPts: ${avgDailyPoints.toFixed(2)}, penalty: ${penaltyMinutes}min, location: ${locationName || 'office'}`);
     }
-
-    // Update hours calendar with daily hours and location data
-    await sheetsService.updateHoursCalendar(dateStr);
 
     logger.info(`Successfully transferred data from ${dateStr} to ${reportSheetName}`);
     return true;
   } catch (error) {
+    transferDailyDataToMonthly.lastError = error.message;
     logger.error(`Error transferring daily data to monthly: ${error.message}`);
     return false;
   }
@@ -390,26 +481,27 @@ async function transferDailyDataToMonthly(dateStr) {
  * Send daily report to Telegram group as Excel file
  * @param {string} dateStr - Date in YYYY-MM-DD format
  * @param {Object} schedulerService - Scheduler service instance
+ * @returns {boolean} True if the report was sent (or legitimately skipped)
  */
 async function sendDailyReportToGroup(dateStr, schedulerService) {
   try {
     if (!schedulerService.bot) {
       logger.error('Bot instance not initialized');
-      return;
+      return false;
     }
 
     if (!Config.DAILY_REPORT_GROUP_ID) {
       logger.warn('DAILY_REPORT_GROUP_ID not configured - skipping group report');
-      return;
+      return true;
     }
 
     const worksheet = await sheetsService.getWorksheet(dateStr);
-    await worksheet.loadHeaderRow();
-    const rows = await worksheet.getRows();
+    await retry(() => worksheet.loadHeaderRow());
+    const rows = await retry(() => worksheet.getRows());
 
     if (rows.length === 0) {
       logger.info('No data for daily report');
-      return;
+      return true;
     }
 
     // Create workbook
@@ -498,9 +590,11 @@ async function sendDailyReportToGroup(dateStr, schedulerService) {
     });
 
     logger.info(`Daily report (Excel file) sent to group ${Config.DAILY_REPORT_GROUP_ID}`);
+    return true;
   } catch (error) {
     logger.error(`Error sending daily report to group: ${error.message}`);
     logger.error(error.stack);
+    return false;
   }
 }
 
@@ -529,8 +623,9 @@ async function deleteDailySheet(dateStr) {
  * @param {string} dateStr - Date in YYYY-MM-DD format
  * @param {Object} schedulerService - Scheduler service instance
  * @param {boolean} manual - If true, skip the 2-minute wait for overnight responses
+ * @param {Object} options - { skipDelete: true } keeps the daily sheet even on success
  */
-async function handleEndOfDay(dateStr, schedulerService, manual = false) {
+async function handleEndOfDay(dateStr, schedulerService, manual = false, options = {}) {
   try {
     logger.info(`=== Starting End-of-Day Process for ${dateStr} ===`);
 
@@ -541,38 +636,129 @@ async function handleEndOfDay(dateStr, schedulerService, manual = false) {
       return;
     }
 
-    // Step 1: Handle overnight workers
-    logger.info('Step 1: Handling overnight workers...');
-    const overnightWorkers = await handleOvernightWorkers(dateStr, schedulerService);
+    // Archive log makes each step idempotent: completed steps are stamped and
+    // skipped on re-runs, so /endday and startup catch-up never double-count
+    const logRow = await getArchiveLogRow(dateStr);
 
-    // Step 2: Wait 2 minutes for responses (only in automatic mode)
-    if (!manual && overnightWorkers > 0) {
-      logger.info(`Step 2: Waiting 2 minutes for overnight worker responses...`);
-      await new Promise(resolve => setTimeout(resolve, 120000)); // 2 minutes
-    } else if (manual) {
-      logger.info('Step 2: Skipped (manual mode)');
+    if (logRow && logRow.get('TransferredAt')) {
+      logger.info(`Steps 1-3 skipped - ${dateStr} already transferred at ${logRow.get('TransferredAt')}`);
+    } else {
+      // Step 1: Handle overnight workers
+      logger.info('Step 1: Handling overnight workers...');
+      const overnightWorkers = await handleOvernightWorkers(dateStr, schedulerService);
+
+      // Step 2: Wait 2 minutes for responses (only in automatic mode)
+      if (!manual && overnightWorkers > 0) {
+        logger.info(`Step 2: Waiting 2 minutes for overnight worker responses...`);
+        await new Promise(resolve => setTimeout(resolve, 120000)); // 2 minutes
+      } else if (manual) {
+        logger.info('Step 2: Skipped (manual mode)');
+      }
+
+      // Step 3: Transfer data to monthly report
+      logger.info('Step 3: Transferring data to monthly report...');
+      const transferred = await transferDailyDataToMonthly(dateStr);
+      if (!transferred) {
+        logger.error('Failed to transfer data - ABORTING end-of-day process to prevent data loss');
+        await notifyAdmins(schedulerService,
+          `❗️ Архивация за ${dateStr} НЕ выполнена: перенос в месячный отчёт не удался.\n` +
+          `Причина: ${transferDailyDataToMonthly.lastError || 'неизвестно (см. логи)'}\n` +
+          `Дневной лист сохранён. Проверьте логи и повторите: /endday ${dateStr}`);
+        return;
+      }
+      await stampArchiveLog(logRow, 'TransferredAt');
     }
 
-    // Step 3: Transfer data to monthly report
-    logger.info('Step 3: Transferring data to monthly report...');
-    const transferred = await transferDailyDataToMonthly(dateStr);
-    if (!transferred) {
-      logger.error('Failed to transfer data - ABORTING end-of-day process to prevent data loss');
-      return;
+    // Step 3b: Update hours calendar
+    let hoursOk = !!(logRow && logRow.get('HoursAt'));
+    if (hoursOk) {
+      logger.info(`Step 3b skipped - hours calendar already updated at ${logRow.get('HoursAt')}`);
+    } else {
+      logger.info('Step 3b: Updating hours calendar...');
+      hoursOk = await sheetsService.updateHoursCalendar(dateStr);
+      if (hoursOk) {
+        await stampArchiveLog(logRow, 'HoursAt');
+      } else {
+        logger.error(`Failed to update hours calendar for ${dateStr} - daily sheet will be kept`);
+        await notifyAdmins(schedulerService,
+          `⚠️ Календарь часов (Hours) за ${dateStr} не обновился. ` +
+          `Дневной лист сохранён. Повторите: /endday ${dateStr} или /hourscalendar ${dateStr}`);
+      }
     }
 
     // Step 4: Send report to Telegram group
-    logger.info('Step 4: Sending report to Telegram group...');
-    await sendDailyReportToGroup(dateStr, schedulerService);
+    let sentOk = !!(logRow && logRow.get('ReportSentAt'));
+    if (sentOk) {
+      logger.info(`Step 4 skipped - report already sent at ${logRow.get('ReportSentAt')}`);
+    } else {
+      logger.info('Step 4: Sending report to Telegram group...');
+      sentOk = await sendDailyReportToGroup(dateStr, schedulerService);
+      if (sentOk) {
+        await stampArchiveLog(logRow, 'ReportSentAt');
+      } else {
+        await notifyAdmins(schedulerService,
+          `⚠️ Отчёт (Excel) за ${dateStr} не отправлен в группу. ` +
+          `Дневной лист сохранён. Повторите: /endday ${dateStr}`);
+      }
+    }
 
-    // Step 5: Delete the daily sheet
-    logger.info('Step 5: Deleting daily sheet...');
-    await deleteDailySheet(dateStr);
-
-    logger.info(`=== End-of-Day Process Completed for ${dateStr} ===`);
+    // Step 5: Delete the daily sheet - ONLY when every previous step succeeded,
+    // because the daily sheet is the only source for re-running Hours/report
+    if (hoursOk && sentOk) {
+      if (options.skipDelete) {
+        logger.info('Step 5: Skipped (skipDelete) - daily sheet kept');
+      } else {
+        logger.info('Step 5: Deleting daily sheet...');
+        await deleteDailySheet(dateStr);
+        await stampArchiveLog(logRow, 'DeletedAt');
+      }
+      logger.info(`=== End-of-Day Process Completed for ${dateStr} ===`);
+    } else {
+      logger.warn(`=== End-of-Day Process for ${dateStr} finished with errors - daily sheet kept for retry ===`);
+    }
   } catch (error) {
     logger.error(`Error in handleEndOfDay: ${error.message}`);
+    await notifyAdmins(schedulerService,
+      `❗️ Ошибка архивации за ${dateStr}: ${error.message}\nПовторите: /endday ${dateStr}`);
     throw error;
+  }
+}
+
+/**
+ * Catch up on days that were never archived (e.g. the bot was down at 00:00
+ * or a previous run failed). Called shortly after startup.
+ * @param {Object} schedulerService - Scheduler service instance
+ */
+async function catchUpMissedDays(schedulerService) {
+  try {
+    await retry(() => sheetsService.doc.loadInfo());
+
+    const today = moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+    const missedDays = Object.keys(sheetsService.doc.sheetsByTitle)
+      .filter(title => /^\d{4}-\d{2}-\d{2}$/.test(title) && title < today)
+      .sort();
+
+    if (missedDays.length === 0) {
+      logger.info('Startup catch-up: no unarchived days found');
+      return;
+    }
+
+    logger.warn(`Startup catch-up: found unarchived days: ${missedDays.join(', ')}`);
+    await notifyAdmins(schedulerService,
+      `⚠️ Обнаружены неархивированные дни: ${missedDays.join(', ')}\nЗапускаю архивацию автоматически...`);
+
+    for (const dateStr of missedDays) {
+      try {
+        await handleEndOfDay(dateStr, schedulerService, true);
+      } catch (error) {
+        logger.error(`Startup catch-up failed for ${dateStr}: ${error.message}`);
+      }
+      await sleep(60000); // pause between days to stay clear of API quotas
+    }
+
+    logger.info('Startup catch-up finished');
+  } catch (error) {
+    logger.error(`Error in startup catch-up: ${error.message}`);
   }
 }
 
@@ -590,6 +776,8 @@ async function execute(schedulerService) {
     logger.info(`End-of-day archiving completed for ${yesterday}`);
   } catch (error) {
     logger.error(`Error in end-of-day archiving: ${error.message}`);
+    await notifyAdmins(schedulerService,
+      `❗️ Ночная архивация упала с ошибкой: ${error.message}\nПроверьте логи и /endday при необходимости.`);
   }
 }
 
@@ -601,6 +789,8 @@ module.exports = {
   transferDailyDataToMonthly,
   sendDailyReportToGroup,
   deleteDailySheet,
+  catchUpMissedDays,
+  notifyAdmins,
   name: 'End of Day Archiving',
   description: 'Runs at 00:00 to archive yesterday (overnight workers, transfer to monthly, send report, delete sheet)'
 };

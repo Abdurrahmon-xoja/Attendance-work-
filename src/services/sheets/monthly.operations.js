@@ -7,6 +7,11 @@ const moment = require('moment-timezone');
 const Config = require('../../config');
 const logger = require('../../utils/logger');
 
+// Google Sheets allows ~60 writes/min per user; midnight jobs write one row per
+// employee to two sheets, so throttle between row writes to stay under quota
+const WRITE_THROTTLE_MS = 1100;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 class MonthlyOperations {
   constructor(coreService, cacheManager, quotaHandler, rosterOperations) {
     this.coreService = coreService;
@@ -211,14 +216,18 @@ class MonthlyOperations {
 
       if (!worksheet) {
         logger.info(`Creating monthly report sheet: ${sheetName}`);
-        worksheet = await this.coreService.doc.addSheet({ title: sheetName });
+        worksheet = await this.quotaHandler.retryOperation(
+          () => this.coreService.doc.addSheet({ title: sheetName }), 5, 2000
+        );
       }
 
       // Resize sheet to fit all columns
-      await worksheet.resize({ rowCount: 1000, columnCount: 30 });
+      await this.quotaHandler.retryOperation(
+        () => worksheet.resize({ rowCount: 1000, columnCount: 30 }), 5, 2000
+      );
 
       // Set headers
-      await worksheet.setHeaderRow([
+      await this.quotaHandler.retryOperation(() => worksheet.setHeaderRow([
         'Name',
         'Telegram ID',
         'Company',
@@ -245,8 +254,20 @@ class MonthlyOperations {
         'Rating (0-10)',
         'Rating Zone',
         'Last Updated'
-      ]);
+      ]), 5, 2000);
       await worksheet.loadHeaderRow();
+
+      // Resume-safe: skip employees already in the sheet (a previous run may
+      // have crashed mid-way, e.g. on a quota error) instead of duplicating them
+      const existingRows = await this.quotaHandler.retryOperation(() => worksheet.getRows(), 5, 2000);
+      const existingIds = new Set();
+      const existingNames = new Set();
+      for (const existing of existingRows) {
+        const tid = (existing.get('Telegram ID') || '').toString().trim();
+        const name = (existing.get('Name') || '').toString().trim();
+        if (tid) existingIds.add(tid);
+        if (name) existingNames.add(name);
+      }
 
       // OPTIMIZATION: Get all employees from cached roster
       const rows = await this._getCachedRoster();
@@ -260,6 +281,11 @@ class MonthlyOperations {
         const doNotWorkSaturday = (row.get('Do not work in Saturday') || '').toString().toLowerCase().trim() === 'yes';
 
         if (nameFull.trim()) {
+          const rosterTid = telegramId.toString().trim();
+          if ((rosterTid && existingIds.has(rosterTid)) || existingNames.has(nameFull.trim())) {
+            continue;
+          }
+
           // Calculate Total Work Days for this employee based on calendar and schedule
           let totalWorkDays = 0;
           const monthStart = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).startOf('month');
@@ -295,7 +321,7 @@ class MonthlyOperations {
           }
           const totalHoursRequired = totalWorkDays * dailyHours;
 
-          await worksheet.addRow({
+          await this.quotaHandler.retryOperation(() => worksheet.addRow({
             'Name': nameFull,
             'Telegram ID': telegramId,
             'Company': company,
@@ -322,7 +348,8 @@ class MonthlyOperations {
             'Rating (0-10)': 0,
             'Rating Zone': '⚪',
             'Last Updated': ''
-          });
+          }), 5, 2000);
+          await sleep(WRITE_THROTTLE_MS);
         }
       }
 
@@ -591,17 +618,21 @@ class MonthlyOperations {
       const daysInMonth = moment.tz(yearMonth, 'YYYY-MM', Config.TIMEZONE).daysInMonth();
 
       // Create sheet
-      worksheet = await this.coreService.doc.addSheet({ title: sheetName });
+      worksheet = await this.quotaHandler.retryOperation(
+        () => this.coreService.doc.addSheet({ title: sheetName }), 5, 2000
+      );
 
       // Resize: Name + Telegram ID + day columns
-      await worksheet.resize({ rowCount: 1000, columnCount: 2 + daysInMonth });
+      await this.quotaHandler.retryOperation(
+        () => worksheet.resize({ rowCount: 1000, columnCount: 2 + daysInMonth }), 5, 2000
+      );
 
       // Build headers: Name, Telegram ID, 1, 2, ..., daysInMonth
       const headers = ['Name', 'Telegram ID'];
       for (let d = 1; d <= daysInMonth; d++) {
         headers.push(String(d));
       }
-      await worksheet.setHeaderRow(headers);
+      await this.quotaHandler.retryOperation(() => worksheet.setHeaderRow(headers), 5, 2000);
       await worksheet.loadHeaderRow();
 
       // Get all employees from cached roster
@@ -612,10 +643,11 @@ class MonthlyOperations {
         const telegramId = row.get('Telegram Id') || '';
 
         if (nameFull.trim()) {
-          await worksheet.addRow({
+          await this.quotaHandler.retryOperation(() => worksheet.addRow({
             'Name': nameFull,
             'Telegram ID': telegramId
-          });
+          }), 5, 2000);
+          await sleep(WRITE_THROTTLE_MS);
         }
       }
 
@@ -656,8 +688,8 @@ class MonthlyOperations {
         return false;
       }
 
-      await hoursSheet.loadHeaderRow();
-      const hoursRows = await hoursSheet.getRows();
+      await this.quotaHandler.retryOperation(() => hoursSheet.loadHeaderRow(), 5, 2000);
+      const hoursRows = await this.quotaHandler.retryOperation(() => hoursSheet.getRows(), 5, 2000);
 
       // Load the daily sheet for dateStr
       const dailySheet = this.coreService.doc.sheetsByTitle[dateStr];
@@ -708,7 +740,8 @@ class MonthlyOperations {
         const hoursRow = hoursRowMap.get(telegramId);
         if (hoursRow) {
           hoursRow.set(dayOfMonth, cellValue);
-          await hoursRow.save();
+          await this.quotaHandler.retryOperation(() => hoursRow.save(), 5, 2000);
+          await sleep(WRITE_THROTTLE_MS);
         } else {
           logger.warn(`Employee ${telegramId} not found in hours calendar ${sheetName}`);
         }

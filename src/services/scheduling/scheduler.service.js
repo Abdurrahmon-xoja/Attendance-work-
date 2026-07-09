@@ -226,6 +226,18 @@ class SchedulerService {
 
     // End of day archiving job
     this.setupEndOfDayArchiving();
+
+    // Catch up on days that were never archived (bot down at 00:00, failed
+    // transfer, etc.). Delayed so startup cache warmup finishes first and we
+    // don't compete with it for the Sheets API quota.
+    setTimeout(async () => {
+      try {
+        await jobs.endOfDayArchivingJob.catchUpMissedDays(this);
+      } catch (error) {
+        logger.error(`Error in startup catch-up: ${error.message}`);
+      }
+    }, 3 * 60 * 1000);
+    logger.info('✅ Startup catch-up for unarchived days scheduled (in 3 min)');
   }
 
   /**

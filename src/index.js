@@ -75,7 +75,12 @@ bot.command('endday', async (ctx) => {
   }
   const args = ctx.message.text.split(' ');
   const moment = require('moment-timezone');
-  const dateStr = args[1] || moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+  const dateStr = args[1] || moment.tz(Config.TIMEZONE).subtract(1, 'day').format('YYYY-MM-DD');
+  const today = moment.tz(Config.TIMEZONE).format('YYYY-MM-DD');
+  if (dateStr >= today) {
+    await ctx.reply(`❌ Нельзя архивировать ${dateStr}: день ещё не закончился. Архивация доступна только за прошедшие дни.`);
+    return;
+  }
   await ctx.reply(`⏳ Запуск архивации за ${dateStr}...`);
   logger.info(`Admin ${telegramId} triggered manual end-of-day for ${dateStr}`);
   try {
@@ -221,9 +226,9 @@ bot.command('adminhelp', async (ctx) => {
     `🔧 КОМАНДЫ АДМИНИСТРАТОРА\n\n` +
     `/createsheet [YYYY-MM-DD] — Создать дневной лист\n` +
     `/monthlyreport [YYYY-MM] — Создать лист месячного отчёта\n` +
-    `/updatereport [YYYY-MM-DD] — Пересчитать отчёт из дневных листов\n` +
+    `/updatereport [YYYY-MM-DD] — ⚠️ ОПАСНО: пересчитывает месяц из дневных листов, обнуляет дни, чьи листы уже удалены\n` +
     `/hourscalendar [YYYY-MM или YYYY-MM-DD] — Календарь часов (создать / обновить день)\n` +
-    `/endday [YYYY-MM-DD] — Архивация дня (ночные → отчёт → Excel → удаление)\n` +
+    `/endday [YYYY-MM-DD] — Архивация дня (по умолчанию вчера; безопасно повторять — выполненные шаги пропускаются)\n` +
     `/noshow [YYYY-MM-DD] — Проверка no-show\n` +
     `/checklocation — Проверить, валидна ли локация\n` +
     `/testgif — Тест гифки\n` +
