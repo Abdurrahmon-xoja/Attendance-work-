@@ -11,9 +11,6 @@
 
 const moment = require('moment-timezone');
 const XLSX = require('xlsx');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
 const sheetsService = require('../../sheets.service');
 const Config = require('../../../config');
 const logger = require('../../../utils/logger');
@@ -43,6 +40,8 @@ let sweepInProgress = false;
 // Days admins were already alerted about, so an hourly retry of a stuck day
 // doesn't message them every hour
 const notifiedMissedDays = new Set();
+// Same idea for step-failure alerts: identical message sent at most once
+const notifiedFailures = new Set();
 
 /**
  * @returns {string|null} Date currently being archived, or null if idle
@@ -68,6 +67,20 @@ async function notifyAdmins(schedulerService, message) {
       logger.error(`Failed to notify admin ${adminId}: ${error.message}`);
     }
   }
+}
+
+/**
+ * Notify admins about a failure at most once per identical message, so the
+ * hourly sweep retrying a stuck day doesn't repeat the same alert every hour.
+ * A different failure reason produces a different message and is sent again.
+ */
+async function notifyAdminsOnce(schedulerService, message) {
+  if (notifiedFailures.has(message)) {
+    logger.info(`Admin alert suppressed (already sent): ${message.split('\n')[0]}`);
+    return;
+  }
+  notifiedFailures.add(message);
+  await notifyAdmins(schedulerService, message);
 }
 
 /**
@@ -547,14 +560,7 @@ async function sendDailyReportToGroup(dateStr, schedulerService) {
     // Add worksheet to workbook
     XLSX.utils.book_append_sheet(workbook, ws, dateStr);
 
-    // Create temporary file path
-    const tempDir = os.tmpdir();
     const fileName = `attendance_${dateStr}.xlsx`;
-    const filePath = path.join(tempDir, fileName);
-
-    // Write Excel file
-    XLSX.writeFile(workbook, filePath);
-    logger.info(`Created Excel file: ${filePath}`);
 
     // Calculate statistics for caption
     let presentCount = 0;
@@ -589,28 +595,35 @@ async function sendDailyReportToGroup(dateStr, schedulerService) {
       `📄 Полный отчёт во вложении\n` +
       `🤖 Данные архивированы автоматически`;
 
-    // Send the Excel file to the group
-    await schedulerService.bot.telegram.sendDocument(
-      Config.DAILY_REPORT_GROUP_ID,
-      { source: filePath, filename: fileName },
-      {
-        caption: caption,
-        parse_mode: 'HTML'
-      }
-    );
+    // Send via Node's built-in fetch (undici): Telegraf/node-fetch multipart
+    // uploads consistently time out on Render (same issue as admin.handler.js)
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    const formData = new FormData();
+    formData.append('chat_id', String(Config.DAILY_REPORT_GROUP_ID));
+    formData.append('caption', caption);
+    formData.append('parse_mode', 'HTML');
+    formData.append('document',
+      new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      fileName);
 
-    // Clean up temporary file
-    fs.unlink(filePath, (err) => {
-      if (err) {
-        logger.warn(`Failed to delete temp file ${filePath}: ${err.message}`);
-      } else {
-        logger.info(`Cleaned up temp file: ${filePath}`);
-      }
-    });
+    const res = await Promise.race([
+      fetch(`https://api.telegram.org/bot${Config.BOT_TOKEN}/sendDocument`, {
+        method: 'POST',
+        body: formData
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('upload timeout (15s)')), 15000)
+      )
+    ]);
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`sendDocument HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
 
     logger.info(`Daily report (Excel file) sent to group ${Config.DAILY_REPORT_GROUP_ID}`);
     return true;
   } catch (error) {
+    sendDailyReportToGroup.lastError = error.message;
     logger.error(`Error sending daily report to group: ${error.message}`);
     logger.error(error.stack);
     return false;
@@ -704,7 +717,7 @@ async function handleEndOfDay(dateStr, schedulerService, manual = false, options
         await stampArchiveLog(logRow, 'HoursAt');
       } else {
         logger.error(`Failed to update hours calendar for ${dateStr} - daily sheet will be kept`);
-        await notifyAdmins(schedulerService,
+        await notifyAdminsOnce(schedulerService,
           `⚠️ Календарь часов (Hours) за ${dateStr} не обновился. ` +
           `Дневной лист сохранён. Повторите: /endday ${dateStr} или /hourscalendar ${dateStr}`);
       }
@@ -720,8 +733,9 @@ async function handleEndOfDay(dateStr, schedulerService, manual = false, options
       if (sentOk) {
         await stampArchiveLog(logRow, 'ReportSentAt');
       } else {
-        await notifyAdmins(schedulerService,
-          `⚠️ Отчёт (Excel) за ${dateStr} не отправлен в группу. ` +
+        await notifyAdminsOnce(schedulerService,
+          `⚠️ Отчёт (Excel) за ${dateStr} не отправлен в группу.\n` +
+          `Причина: ${sendDailyReportToGroup.lastError || 'неизвестно (см. логи)'}\n` +
           `Дневной лист сохранён. Повторите: /endday ${dateStr}`);
       }
     }
