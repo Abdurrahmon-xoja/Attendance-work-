@@ -35,6 +35,18 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Keep-alive self-ping: free-tier hosts (e.g. Render) idle the process when
+// there is no traffic, so the 00:00 archiving job never fires. Pinging our own
+// public URL counts as traffic and keeps the process awake. No-op when unset.
+const selfPingUrl = process.env.SELF_PING_URL || process.env.RENDER_EXTERNAL_URL;
+if (selfPingUrl) {
+  const pingTarget = `${selfPingUrl.replace(/\/+$/, '')}/health`;
+  setInterval(() => {
+    fetch(pingTarget).catch(err => logger.warn(`Self-ping failed: ${err.message}`));
+  }, 10 * 60 * 1000);
+  logger.info(`Keep-alive self-ping enabled: ${pingTarget} every 10 min`);
+}
+
 // Create stage and register scenes
 const stage = new Scenes.Stage([registrationWizard]);
 bot.use(stage.middleware());
@@ -81,10 +93,14 @@ bot.command('endday', async (ctx) => {
     await ctx.reply(`❌ Нельзя архивировать ${dateStr}: день ещё не закончился. Архивация доступна только за прошедшие дни.`);
     return;
   }
+  const { handleEndOfDay, isBusy } = require('./services/scheduling/jobs/endOfDayArchiving.job');
+  if (isBusy()) {
+    await ctx.reply(`⏳ Архивация за ${isBusy()} уже выполняется. Попробуйте через несколько минут.`);
+    return;
+  }
   await ctx.reply(`⏳ Запуск архивации за ${dateStr}...`);
   logger.info(`Admin ${telegramId} triggered manual end-of-day for ${dateStr}`);
   try {
-    const { handleEndOfDay } = require('./services/scheduling/jobs/endOfDayArchiving.job');
     await handleEndOfDay(dateStr, schedulerService, true);
     await ctx.reply(`✅ Архивация за ${dateStr} завершена!`);
   } catch (error) {

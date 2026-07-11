@@ -20,6 +20,10 @@ const logger = require('../../../utils/logger');
 
 // Schedule: Every day at 00:00 (midnight)
 const schedule = '0 0 * * *';
+// Self-healing sweep: hourly at :15, re-archives anything the midnight run
+// missed (process asleep at 00:00, quota abort). :15 avoids the 00:00 and
+// 00:01 jobs. Idempotent via _ArchiveLog, so re-runs never double-count.
+const sweepSchedule = '15 * * * *';
 
 // Longer retry schedule than the sheets-service default: midnight batches hit
 // the per-minute write quota, so 2s/4s/8s/16s/32s rides out the quota window
@@ -31,6 +35,21 @@ const WRITE_THROTTLE_MS = 1100;
 // Makes end-of-day idempotent (safe /endday re-runs, startup catch-up).
 const ARCHIVE_LOG_SHEET = '_ArchiveLog';
 const ARCHIVE_LOG_HEADERS = ['Date', 'TransferredAt', 'HoursAt', 'ReportSentAt', 'DeletedAt'];
+
+// A single archiving run takes minutes (1.1s throttle per employee row), so the
+// 00:00 job, the hourly sweep, startup catch-up and /endday must not overlap
+let archivingDayInProgress = null; // dateStr of the day currently being archived
+let sweepInProgress = false;
+// Days admins were already alerted about, so an hourly retry of a stuck day
+// doesn't message them every hour
+const notifiedMissedDays = new Set();
+
+/**
+ * @returns {string|null} Date currently being archived, or null if idle
+ */
+function isBusy() {
+  return archivingDayInProgress;
+}
 
 /**
  * Send an alert message to all configured admins
@@ -626,6 +645,11 @@ async function deleteDailySheet(dateStr) {
  * @param {Object} options - { skipDelete: true } keeps the daily sheet even on success
  */
 async function handleEndOfDay(dateStr, schedulerService, manual = false, options = {}) {
+  if (archivingDayInProgress) {
+    logger.warn(`End-of-day for ${dateStr} skipped: archiving of ${archivingDayInProgress} is already in progress`);
+    return;
+  }
+  archivingDayInProgress = dateStr;
   try {
     logger.info(`=== Starting End-of-Day Process for ${dateStr} ===`);
 
@@ -721,15 +745,24 @@ async function handleEndOfDay(dateStr, schedulerService, manual = false, options
     await notifyAdmins(schedulerService,
       `❗️ Ошибка архивации за ${dateStr}: ${error.message}\nПовторите: /endday ${dateStr}`);
     throw error;
+  } finally {
+    archivingDayInProgress = null;
   }
 }
 
 /**
  * Catch up on days that were never archived (e.g. the bot was down at 00:00
- * or a previous run failed). Called shortly after startup.
+ * or a previous run failed). Called 3 min after startup and hourly as a
+ * self-healing sweep — node-cron never retries a missed midnight tick, so
+ * without this a night when the process was asleep is lost forever.
  * @param {Object} schedulerService - Scheduler service instance
  */
 async function catchUpMissedDays(schedulerService) {
+  if (sweepInProgress) {
+    logger.info('Archiving sweep skipped: previous sweep is still running');
+    return;
+  }
+  sweepInProgress = true;
   try {
     await retry(() => sheetsService.doc.loadInfo());
 
@@ -739,26 +772,32 @@ async function catchUpMissedDays(schedulerService) {
       .sort();
 
     if (missedDays.length === 0) {
-      logger.info('Startup catch-up: no unarchived days found');
+      logger.info('Archiving sweep: no unarchived days found');
       return;
     }
 
-    logger.warn(`Startup catch-up: found unarchived days: ${missedDays.join(', ')}`);
-    await notifyAdmins(schedulerService,
-      `⚠️ Обнаружены неархивированные дни: ${missedDays.join(', ')}\nЗапускаю архивацию автоматически...`);
+    logger.warn(`Archiving sweep: found unarchived days: ${missedDays.join(', ')}`);
+    const newDays = missedDays.filter(d => !notifiedMissedDays.has(d));
+    if (newDays.length > 0) {
+      newDays.forEach(d => notifiedMissedDays.add(d));
+      await notifyAdmins(schedulerService,
+        `⚠️ Обнаружены неархивированные дни: ${newDays.join(', ')}\nЗапускаю архивацию автоматически...`);
+    }
 
     for (const dateStr of missedDays) {
       try {
         await handleEndOfDay(dateStr, schedulerService, true);
       } catch (error) {
-        logger.error(`Startup catch-up failed for ${dateStr}: ${error.message}`);
+        logger.error(`Archiving sweep failed for ${dateStr}: ${error.message}`);
       }
       await sleep(60000); // pause between days to stay clear of API quotas
     }
 
-    logger.info('Startup catch-up finished');
+    logger.info('Archiving sweep finished');
   } catch (error) {
-    logger.error(`Error in startup catch-up: ${error.message}`);
+    logger.error(`Error in archiving sweep: ${error.message}`);
+  } finally {
+    sweepInProgress = false;
   }
 }
 
@@ -783,6 +822,7 @@ async function execute(schedulerService) {
 
 module.exports = {
   schedule,
+  sweepSchedule,
   execute,
   handleEndOfDay,
   handleOvernightWorkers,
@@ -791,6 +831,7 @@ module.exports = {
   deleteDailySheet,
   catchUpMissedDays,
   notifyAdmins,
+  isBusy,
   name: 'End of Day Archiving',
   description: 'Runs at 00:00 to archive yesterday (overnight workers, transfer to monthly, send report, delete sheet)'
 };

@@ -227,6 +227,11 @@ class SchedulerService {
     // End of day archiving job
     this.setupEndOfDayArchiving();
 
+    // Hourly self-healing sweep: node-cron never retries a missed midnight
+    // tick (process asleep/restarting at 00:00), so this re-archives any
+    // leftover daily sheets within the hour
+    this.setupArchivingSweep();
+
     // Catch up on days that were never archived (bot down at 00:00, failed
     // transfer, etc.). Delayed so startup cache warmup finishes first and we
     // don't compete with it for the Sheets API quota.
@@ -382,6 +387,24 @@ class SchedulerService {
 
     this.jobs.push(job);
     logger.info(`${jobs.endOfDayArchivingJob.name} job scheduled (${jobs.endOfDayArchivingJob.schedule})`);
+  }
+
+  /**
+   * Setup hourly archiving sweep job
+   */
+  setupArchivingSweep() {
+    const job = cron.schedule(jobs.endOfDayArchivingJob.sweepSchedule, async () => {
+      try {
+        await jobs.endOfDayArchivingJob.catchUpMissedDays(this);
+      } catch (error) {
+        logger.error(`Error in archiving sweep job: ${error.message}`);
+      }
+    }, {
+      timezone: Config.TIMEZONE
+    });
+
+    this.jobs.push(job);
+    logger.info(`Archiving sweep job scheduled (${jobs.endOfDayArchivingJob.sweepSchedule})`);
   }
 
   /**
