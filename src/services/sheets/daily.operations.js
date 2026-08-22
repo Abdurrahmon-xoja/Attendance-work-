@@ -210,7 +210,11 @@ class DailyOperations {
           'departure_reminder_sent',
           'auto_departure_warning_sent',
           'work_extension_minutes',
-          'extended_work_reminder_sent'
+          'extended_work_reminder_sent',
+          // Set when the scheduler marks a departure the employee never asked
+          // for, so the "🙋 Нет, я ещё на работе" button knows it may undo it.
+          'auto_departure_applied',
+          'auto_departure_at'
         ]);
         await worksheet.loadHeaderRow();
 

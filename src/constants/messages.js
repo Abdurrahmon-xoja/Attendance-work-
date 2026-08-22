@@ -65,6 +65,16 @@ module.exports = {
   AUTO_DEPARTURE_WARNING: '⚠️ Внимание! Через {minutes} минут будет автоматически зарегистрирован уход без сообщения.',
   AUTO_DEPARTURE_EXECUTED: '🤖 Автоматически зарегистрирован уход (вы не отметили уход вовремя).',
 
+  // Sent to the last person still checked in at an office when they leave.
+  // {office} is the office name from the daily sheet's "Location Name" column.
+  LAST_LEAVER: '🔑 Вы уходите последним{office}.\n\n' +
+    'Пожалуйста, проверьте перед уходом:\n' +
+    '• 💡 свет\n' +
+    '• ❄️ кондиционеры\n' +
+    '• 🪟 окна\n' +
+    '• 🚪 закрыта ли дверь\n\n' +
+    'Спасибо и хорошего вечера! 👋',
+
   // Daily Report
   DAILY_REPORT_HEADER: '📊 Ежедневный отчет за {date}',
   DAILY_REPORT_NO_DATA: 'Нет данных за сегодня.',

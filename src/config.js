@@ -94,6 +94,17 @@ class Config {
   // Auto-Departure Configuration
   static AUTO_DEPARTURE_GRACE_MINUTES = parseInt(process.env.AUTO_DEPARTURE_GRACE_MINUTES || '15');
   static AUTO_DEPARTURE_WARNING_MINUTES = parseInt(process.env.AUTO_DEPARTURE_WARNING_MINUTES || '10');
+  // How long after an automatic departure the employee may still undo it with
+  // the "🙋 Нет, я ещё на работе" button.
+  static AUTO_DEPARTURE_UNDO_WINDOW_MINUTES = parseInt(process.env.AUTO_DEPARTURE_UNDO_WINDOW_MINUTES || '180');
+  // Minutes added to the work day when they do undo it.
+  static AUTO_DEPARTURE_UNDO_EXTENSION_MINUTES = parseInt(process.env.AUTO_DEPARTURE_UNDO_EXTENSION_MINUTES || '60');
+
+  // Last-Leaver Notice
+  // DMs the last person still checked in at an office a reminder to check the
+  // lights and doors. Scoped by the daily sheet's "Location Name" column.
+  static ENABLE_LAST_LEAVER_NOTICE = process.env.ENABLE_LAST_LEAVER_NOTICE !== 'false';
+  static LAST_LEAVER_NOTIFY_ADMINS = process.env.LAST_LEAVER_NOTIFY_ADMINS === 'true';
 
   // Notification Configuration
   static NOTIFICATION_ARRIVAL_MINUS_5 = process.env.NOTIFICATION_ARRIVAL_MINUS_5 !== 'false';

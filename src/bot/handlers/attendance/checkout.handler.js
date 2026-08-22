@@ -24,6 +24,8 @@ const {
   awaitingLocationForCheckout
 } = require('./shared');
 const { processDepartureWithLocation } = require('./location.handler');
+const { notifyIfLastToLeave } = require('./lastLeaver');
+const { setIfHeaderExists } = require('../../../utils/rowHelper');
 
 /**
  * Setup checkout/departure handlers
@@ -207,6 +209,7 @@ function setupCheckoutHandlers(bot) {
     responseText += `\n\n📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`;
 
     await ctx.reply(responseText, Keyboards.getMainMenu(ctx.from.id));
+    await notifyIfLastToLeave(ctx.telegram, user);
     logger.info(`Departure logged for ${user.nameFull}: ${departureMessage}`);
   });
 
@@ -398,6 +401,7 @@ function setupCheckoutHandlers(bot) {
         Keyboards.getMainMenu(ctx.from.id)
       );
 
+      await notifyIfLastToLeave(ctx.telegram, user);
       logger.info(`On-time departure logged for ${user.nameFull}`);
     }
   });
@@ -679,6 +683,7 @@ function setupCheckoutHandlers(bot) {
     );
 
     await ctx.reply('🏠 Главное меню:', Keyboards.getMainMenu(ctx.from.id));
+    await notifyIfLastToLeave(ctx.telegram, user);
 
     logger.info(`Early departure logged for ${user.nameFull}: ${reasonText}`);
   });
@@ -1164,10 +1169,183 @@ function setupCheckoutHandlers(bot) {
         `Хорошего вечера! 👋`
       );
 
+      await notifyIfLastToLeave(ctx.telegram, user);
       logger.info(`${user.nameFull} marked departure via auto-depart button at ${departureTime}`);
     } catch (error) {
       await ctx.answerCbQuery('❌ Ошибка');
       logger.error(`Error handling auto-depart now: ${error.message}`);
+    }
+  });
+
+  // AUTO-DEPARTURE: "🙋 Нет, я ещё на работе" — undo an automatic departure
+  //
+  // The button only ever appears on the message the scheduler sends after it
+  // marks someone as gone, and it carries the time it wrote. That time must
+  // still be what's on the sheet, which is what stops this from cancelling a
+  // departure the employee marked themselves afterwards.
+  bot.action(/^still_here:(.+)$/, async (ctx) => {
+    const autoDepartureTime = ctx.match[1];
+
+    const user = await getUserOrPromptRegistration(ctx);
+    if (!user) {
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const today = now.format('YYYY-MM-DD');
+
+      const employeeRow = await sheetsService.getCachedDailyRow(today, user.telegramId.toString());
+      if (!employeeRow) {
+        await ctx.answerCbQuery('❌ Данные за сегодня не найдены.', { show_alert: true });
+        return;
+      }
+
+      const leaveTime = (employeeRow.get('Leave time') || '').toString().trim();
+
+      if (!leaveTime) {
+        await ctx.answerCbQuery('✅ Отметки об уходе нет — вы и так в рабочем дне.');
+        return;
+      }
+
+      // Only the exact automatic departure may be undone.
+      if (leaveTime.slice(0, 5) !== autoDepartureTime.slice(0, 5)) {
+        await ctx.answerCbQuery(
+          '⚠️ Уход был отмечен вручную позже — отмените его через отметку прихода.',
+          { show_alert: true }
+        );
+        return;
+      }
+
+      // ...and only while it is still today's business.
+      const departedAt = moment.tz(`${today} ${autoDepartureTime}`, 'YYYY-MM-DD HH:mm', Config.TIMEZONE);
+      if (now.diff(departedAt, 'minutes') > Config.AUTO_DEPARTURE_UNDO_WINDOW_MINUTES) {
+        await ctx.answerCbQuery(
+          `⚠️ Отменить можно только в течение ${Config.AUTO_DEPARTURE_UNDO_WINDOW_MINUTES} минут после авто-ухода.`,
+          { show_alert: true }
+        );
+        return;
+      }
+
+      // Put the day back the way it was before the scheduler closed it.
+      employeeRow.set('Leave time', '');
+      employeeRow.set('Hours worked', '');
+
+      if ((employeeRow.get('Left early') || '').toString().trim()) {
+        employeeRow.set('Left early', '');
+        employeeRow.set('Why left early', '');
+      }
+
+      // Give them room to finish, and re-arm the reminders for the new end time.
+      const extension = Config.AUTO_DEPARTURE_UNDO_EXTENSION_MINUTES;
+      const currentExtension = parseInt(employeeRow.get('work_extension_minutes') || '0');
+      employeeRow.set('work_extension_minutes', (currentExtension + extension).toString());
+      employeeRow.set('auto_departure_warning_sent', 'false');
+      employeeRow.set('extended_work_reminder_sent', 'false');
+      setIfHeaderExists(employeeRow, 'auto_departure_applied', '');
+      setIfHeaderExists(employeeRow, 'auto_departure_at', '');
+
+      await employeeRow.save();
+
+      await sheetsService.logEvent(
+        user.telegramId,
+        user.nameFull,
+        'AUTO_DEPARTURE_UNDONE',
+        `Отмена авто-ухода в ${autoDepartureTime} — сотрудник на месте`,
+        0
+      );
+
+      const hours = Math.floor(extension / 60);
+      const mins = extension % 60;
+      const extendText = hours > 0 ? `${hours} ч${mins > 0 ? ` ${mins} мин` : ''}` : `${mins} мин`;
+
+      await ctx.answerCbQuery('✅ Отметка об уходе отменена');
+      await ctx.editMessageText(
+        `✅ Отметка об уходе отменена — вы снова в рабочем дне\n\n` +
+        `➕ Рабочее время продлено на ${extendText}\n\n` +
+        `Не забудьте отметить уход, когда закончите. Нужно больше времени?`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('⏱ +1 час', 'extend_work:60'),
+            Markup.button.callback('⏱ +2 часа', 'extend_work:120')
+          ],
+          [Markup.button.callback('⏱ Работаю всю ночь', 'extend_work:480')]
+        ])
+      );
+
+      logger.info(`${user.nameFull} undid the automatic departure of ${autoDepartureTime}`);
+    } catch (error) {
+      await ctx.answerCbQuery('❌ Ошибка');
+      logger.error(`Error undoing auto-departure for ${user.telegramId}: ${error.message}`);
+    }
+  });
+
+  // OVERNIGHT: "✅ Я всё ещё здесь" on the end-of-day message — the shift ran
+  // past midnight, so mark an arrival on the new day's sheet.
+  bot.action(/^overnight_still_working:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+
+    const user = await getUserOrPromptRegistration(ctx);
+    if (!user) return;
+
+    const nextDay = ctx.match[1]; // YYYY-MM-DD
+
+    try {
+      const now = moment.tz(Config.TIMEZONE);
+      const currentTime = now.format('HH:mm');
+
+      await sheetsService.initializeDailySheet(nextDay);
+
+      const worksheet = await sheetsService.getWorksheet(nextDay);
+      await worksheet.loadHeaderRow();
+      const rows = await worksheet.getRows();
+
+      const employeeRow = rows.find(
+        (row) => (row.get('TelegramId') || '').toString().trim() === user.telegramId.toString()
+      );
+
+      if (!employeeRow) {
+        await ctx.editMessageText(
+          `❌ Не удалось найти вас в листе ${nextDay}\n\n` +
+          `Отметьте приход обычным способом.`
+        );
+        return;
+      }
+
+      if ((employeeRow.get('When come') || '').toString().trim()) {
+        await ctx.editMessageText(`ℹ️ Приход на ${nextDay} уже отмечен.`);
+        return;
+      }
+
+      employeeRow.set('When come', currentTime);
+      employeeRow.set('Came on time', 'true'); // a continuing night shift is never "late"
+      await employeeRow.save();
+
+      await sheetsService.logEvent(
+        user.telegramId,
+        user.nameFull,
+        'OVERNIGHT_CONTINUATION',
+        `Продолжение работы с предыдущего дня на ${nextDay}`,
+        0.5 // bonus for the overnight shift
+      );
+
+      const formattedDate = moment.tz(nextDay, 'YYYY-MM-DD', Config.TIMEZONE).format('DD.MM.YYYY');
+
+      await ctx.editMessageText(
+        `✅ Приход отмечен для ${formattedDate}!\n\n` +
+        `⏰ Время: ${currentTime}\n` +
+        `🌙 Продолжение ночной смены\n` +
+        `📊 Бонус: +0.5 балла\n\n` +
+        `Не забудьте отметить уход, когда закончите работу!`
+      );
+
+      await ctx.reply('🏠 Главное меню:', Keyboards.getMainMenu(ctx.from.id));
+
+      logger.info(`Overnight worker ${user.nameFull} marked arrival for ${nextDay} at ${currentTime}`);
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка: ${error.message}`, Keyboards.getMainMenu(ctx.from.id));
+      logger.error(`Error in overnight_still_working: ${error.message}`);
     }
   });
 
@@ -1564,6 +1742,7 @@ function setupCheckoutHandlers(bot) {
       responseText += `\n\n📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`;
 
       await ctx.reply(responseText, Keyboards.getMainMenu(ctx.from.id));
+      await notifyIfLastToLeave(ctx.telegram, user);
       logger.info(`Departure logged for ${user.nameFull}: ${departureMessage}`);
 
       delete ctx.session.awaitingDepartureMessage;
@@ -1719,6 +1898,7 @@ function setupCheckoutHandlers(bot) {
         `📊 Баллы сегодня: ${todayPoint} ${pointEmoji}`,
         Keyboards.getMainMenu(ctx.from.id)
       );
+      await notifyIfLastToLeave(ctx.telegram, user);
 
       delete ctx.session.awaitingEarlyDepartureReason;
       logger.info(`Early departure logged for ${user.nameFull}: ${reason}`);

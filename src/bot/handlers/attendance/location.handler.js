@@ -281,6 +281,10 @@ async function processOnsiteArrival(ctx, onsiteState) {
  * @returns {Promise<void>}
  */
 async function processDepartureWithLocation(ctx, user, location, checkoutState) {
+  // Required here rather than at the top: checkout.handler requires this module,
+  // and lastLeaver is only needed once a departure actually completes.
+  const { notifyIfLastToLeave } = require('./lastLeaver');
+
   try {
     const now = moment.tz(Config.TIMEZONE);
 
@@ -463,6 +467,8 @@ async function processDepartureWithLocation(ctx, user, location, checkoutState) 
       ...Keyboards.getMainMenu(ctx.from.id),
       parse_mode: 'Markdown'
     });
+
+    await notifyIfLastToLeave(ctx.telegram, user);
 
     logger.info(`Departure with location logged for ${user.nameFull}: ${details}`);
 

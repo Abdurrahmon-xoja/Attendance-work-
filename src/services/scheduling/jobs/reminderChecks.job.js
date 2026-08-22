@@ -10,6 +10,8 @@
  */
 
 const moment = require('moment-timezone');
+const { Markup } = require('telegraf');
+const { setIfHeaderExists } = require('../../../utils/rowHelper');
 const sheetsService = require('../../sheets.service');
 const Config = require('../../../config');
 const logger = require('../../../utils/logger');
@@ -716,8 +718,6 @@ async function checkAndSendReminders(schedulerService) {
         // Send warning if it's time and not sent yet
         if (currentMinute === warningMinute && autoDepartureWarningSent.toLowerCase() !== 'true') {
           try {
-            const Markup = require('telegraf').Markup;
-
             // Format the actual end time (including extension if any)
             const actualEndTime = workEnd.format('HH:mm');
 
@@ -796,6 +796,12 @@ async function checkAndSendReminders(schedulerService) {
             const hoursWorked = minutesWorked / 60;
             row.set('Hours worked', hoursWorked.toFixed(2));
 
+            // Audit trail for the "🙋 Нет, я ещё на работе" undo. No-ops on a
+            // daily tab created before these columns existed — the button
+            // carries the departure time itself, so the undo still works.
+            setIfHeaderExists(row, 'auto_departure_applied', 'true');
+            setIfHeaderExists(row, 'auto_departure_at', departureTime);
+
             rowsToUpdate.push(row); // OPTIMIZATION: Batch save instead of individual save
 
             // Remove buttons from warning message if it exists
@@ -829,13 +835,17 @@ async function checkAndSendReminders(schedulerService) {
               0
             );
 
-            // Send notification to employee
+            // Send notification to employee, with a one-tap way to say the
+            // departure was wrong and they are in fact still working.
             const sent = await schedulerService.sendMessageSafe(
               telegramId,
               `✅ Вы автоматически отмечены как ушедший\n\n` +
               `🕐 Время ухода: ${departureTime}\n` +
               `⏱ Отработано: ${CalculatorService.formatTimeDiff(minutesWorked)}\n\n` +
-              `Если вы всё ещё на работе, пожалуйста, отметьте приход заново.`
+              `Если вы всё ещё на работе — нажмите кнопку ниже, и отметка об уходе будет отменена.`,
+              Markup.inlineKeyboard([
+                [Markup.button.callback('🙋 Нет, я ещё на работе', `still_here:${departureTime}`)]
+              ])
             );
 
             if (!sent) {
